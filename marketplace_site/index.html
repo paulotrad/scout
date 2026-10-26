@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#122139">
+  <meta name="description" content="Run local Marketplace scans and review AI item and condition estimates.">
+  <title>Scout — Marketplace scans</title>
+  <link rel="stylesheet" href="__BASE_PATH__/styles.css">
+  <script src="__BASE_PATH__/app.js?v=20261026-3" defer></script>
+</head>
+<body data-public-writes="__PUBLIC_WRITES__">
+  <header class="site-header">
+    <div class="shell header-inner">
+      <a class="brand" href="__BASE_PATH__/" aria-label="Scout home">
+        <span class="brand-mark" aria-hidden="true"><span></span></span>
+        <span>Scout<span class="brand-dot">.</span></span>
+      </a>
+      <div class="header-actions">
+        <label class="scan-picker-label" for="scan-picker">Jump to scan</label>
+        <select id="scan-picker" aria-label="Jump to a saved scan">
+          <option value="">Choose a scan</option>
+        </select>
+        <a class="header-alert-link" id="alert-link" href="__BASE_PATH__/#alerts-title">Alerts <span id="alert-count" aria-label="Unread alerts">0</span></a>
+        <a class="header-link" href="__BASE_PATH__/setup">Plan setup <span aria-hidden="true">↗</span></a>
+        <a class="header-link admin-link" href="__BASE_PATH__/#admin">Admin</a>
+      </div>
+    </div>
+  </header>
+  <main id="app" class="shell" aria-live="polite">
+    <div class="loading-state">Loading scans…</div>
+  </main>
+  <footer class="site-footer">
+    <div class="shell footer-inner">
+      <span>Scans run on the Scout computer using its direct connection.</span>
+      <span>AI estimates need human review.</span>
+    </div>
+  </footer>
+</body>
+</html>

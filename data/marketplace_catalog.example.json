@@ -1,0 +1,11 @@
+[
+  {
+    "id": "gpu:nvidia-rtx-5060-ti-16gb",
+    "name": "NVIDIA GeForce RTX 5060 Ti 16GB",
+    "category": "graphics_card",
+    "aliases": ["GEFORCE RTX 5060Ti 16gb", "RTX 5060 Ti 16 GB"],
+    "must_contain": ["RTX", "5060", "Ti", "16GB"],
+    "reference_url": "https://www.nvidia.com/en-us/geforce/graphics-cards/50-series/rtx-5060-family/",
+    "new_price_usd": null
+  }
+]

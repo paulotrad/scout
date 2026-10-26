@@ -1,0 +1,8 @@
+__pycache__/
+.venv/
+*.pyc
+runs/
+.env
+.codex-attachments/
+vendor/
+marketplace_settings.json

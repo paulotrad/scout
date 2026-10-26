@@ -18,10 +18,12 @@ For the existing Cloudflare route at `https://app.thedeveloperpaul.com/Facebookn
 ```powershell
 $env:SCOUT_PUBLIC_HOST = 'app.thedeveloperpaul.com'
 $env:SCOUT_PUBLIC_WRITES = '1'
+$env:SCOUT_CF_TEAM_DOMAIN = 'sparkling-frost-1ea7.cloudflareaccess.com'
+$env:SCOUT_CF_AUD = '9d46018cd7f9357ee641888bcc3b6a8e3cd6b1a11bed64821be951df9fa268ae'
 python marketplace_web.py --port 8765
 ```
 
-The tunnel must forward `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The site is currently open for reading and writing. An email identifies a saved demo profile; it does **not** verify ownership or authenticate the visitor. Billing and email delivery are previews, not connected services.
+The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects that path and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing and email delivery are previews, not connected services.
 
 ## What a scan does
 
@@ -38,5 +40,6 @@ The pipeline collects Marketplace cards, reads seller descriptions, applies the 
 - `runs/scans/` contains saved scan manifests, intermediate results, and local listing photos. The legacy October 22 scan also needs `runs/facebook_free_21009_within15_conditioned.json` and `runs/facebook_free_21009_candidate_pool_images/`.
 - `runs/town_geocodes.json` caches approximate distances. Seller towns can make radius checks approximate.
 - `data/` has sample cards and an example product catalog for local testing.
+- `marketplace_settings.example.json` supplies starter scan settings. Scout saves live local settings to the ignored `marketplace_settings.json` file.
 
 Run the tests with `python -m unittest discover -s tests`. To exercise card parsing without opening Facebook, use `python fb_marketplace.py --fixture data/facebook_cards_demo.json --output runs/facebook_demo.json`.
