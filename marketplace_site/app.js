@@ -1,7 +1,7 @@
 const app = document.getElementById("app");
 const picker = document.getElementById("scan-picker");
-const basePath = location.pathname === "/Facebooknotify" ||
-  location.pathname.startsWith("/Facebooknotify/") ? "/Facebooknotify" : "";
+const basePath = ["/notify", "/Facebooknotify"].find(prefix =>
+  location.pathname === prefix || location.pathname.startsWith(`${prefix}/`)) || "";
 const appPath = path => `${basePath}${path}`;
 const pagePath = location.pathname.slice(basePath.length) || "/";
 const scanPath = /^\/scan\/(scan-[a-z0-9-]+)$/.exec(pagePath);

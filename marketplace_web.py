@@ -36,7 +36,8 @@ from marketplace_scan_runner import (
 
 
 WEB = ROOT / "marketplace_site"
-PUBLIC_PREFIX = "/Facebooknotify"
+PUBLIC_PREFIX = "/notify"
+LEGACY_PUBLIC_PREFIX = "/Facebooknotify"
 PUBLIC_HOST = os.environ.get("SCOUT_PUBLIC_HOST", "").strip().lower()
 PUBLIC_WRITES = os.environ.get("SCOUT_PUBLIC_WRITES", "") == "1"
 CF_TEAM_DOMAIN = os.environ.get("SCOUT_CF_TEAM_DOMAIN", "").strip().lower()
@@ -54,10 +55,11 @@ active_scan_id: str | None = None
 
 def route_path(path: str) -> tuple[str, str]:
     """Map the optional Cloudflare path prefix to Scout's local routes."""
-    if path == PUBLIC_PREFIX:
-        return "/", PUBLIC_PREFIX
-    if path.startswith(PUBLIC_PREFIX + "/"):
-        return path[len(PUBLIC_PREFIX):], PUBLIC_PREFIX
+    for prefix in (PUBLIC_PREFIX, LEGACY_PUBLIC_PREFIX):
+        if path == prefix:
+            return "/", prefix
+        if path.startswith(prefix + "/"):
+            return path[len(prefix):], prefix
     return path, ""
 
 
@@ -514,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
     def _public_request(self) -> bool:
         path = unquote(urlsplit(self.path).path)
         return bool(PUBLIC_HOST and self.headers.get("Host", "").lower() == PUBLIC_HOST
-                    and route_path(path)[1] == PUBLIC_PREFIX)
+                    and route_path(path)[1] in {PUBLIC_PREFIX, LEGACY_PUBLIC_PREFIX})
 
     def _local_request(self) -> bool:
         expected = f"127.0.0.1:{self.server.server_port}"
@@ -581,6 +583,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, str(error))
         request = urlsplit(self.path)
         path, base_path = route_path(unquote(request.path))
+        if self._public_request() and base_path == LEGACY_PUBLIC_PREFIX:
+            destination = PUBLIC_PREFIX + path
+            if request.query:
+                destination += "?" + request.query
+            self.send_response(308)
+            self.send_header("Location", destination)
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         if self._public_request() and path == "/api/searches":
             return self._error(403, "This page is available only on this computer")
         if self._public_request() and path in {"/admin", "/api/admin"} and not self._is_admin(identity):

@@ -60,7 +60,7 @@ class MarketplaceWebTests(unittest.TestCase):
                             headers["Cf-Access-Jwt-Assertion"] = token
                         if spoof:
                             headers["X-Scout-Email"] = spoof
-                        connection.request("GET", "/Facebooknotify" + path,
+                        connection.request("GET", "/notify" + path,
                                            headers=headers)
                         response = connection.getresponse()
                         body = response.read()
@@ -71,6 +71,11 @@ class MarketplaceWebTests(unittest.TestCase):
                         return result
 
                     self.assertEqual(request("/api/admin")[0], 401)
+                    legacy = HTTPConnection("127.0.0.1", server.server_port)
+                    legacy.request("GET", "/Facebooknotify/api/scans",
+                                   headers={"Host": "scout.example.com"})
+                    self.assertEqual(legacy.getresponse().status, 401)
+                    legacy.close()
                     self.assertEqual(request("/api/admin", "member@example.com",
                                              spoof="admin@example.com")[0], 403)
                     self.assertEqual(request("/admin", "member@example.com")[0], 403)
@@ -137,7 +142,7 @@ class MarketplaceWebTests(unittest.TestCase):
                         if body is not None:
                             headers["Content-Type"] = "application/json"
                         connection.request("POST" if body is not None else "GET",
-                                           "/Facebooknotify" + path,
+                                           "/notify" + path,
                                            body=json.dumps(body) if body is not None else None,
                                            headers=headers)
                         response = connection.getresponse()
@@ -192,6 +197,10 @@ class MarketplaceWebTests(unittest.TestCase):
         self.assertIsNone(result_path({"result_file": "../../Windows/win.ini"}))
 
     def test_cloudflare_path_keeps_routes_scoped_to_prefix(self):
+        self.assertEqual(marketplace_web.route_path("/notify"),
+                         ("/", "/notify"))
+        self.assertEqual(marketplace_web.route_path("/notify/api/scans"),
+                         ("/api/scans", "/notify"))
         self.assertEqual(marketplace_web.route_path("/Facebooknotify"),
                          ("/", "/Facebooknotify"))
         self.assertEqual(marketplace_web.route_path("/Facebooknotify/api/scans"),
@@ -221,23 +230,25 @@ class MarketplaceWebTests(unittest.TestCase):
                     connection.close()
                     return result
 
-                status, html = request("/Facebooknotify/", "scout.example.com")
+                status, html = request("/notify/", "scout.example.com")
                 self.assertEqual(status, 200)
-                self.assertIn('href="/Facebooknotify/styles.css?v=20261026-7"', html)
-                self.assertIn('href="/Facebooknotify/admin"', html)
+                self.assertIn('href="/notify/styles.css?v=20261026-7"', html)
+                self.assertIn('href="/notify/admin"', html)
                 self.assertIn('data-public-writes="true"', html)
                 self.assertEqual(request("/", "scout.example.com")[0], 403)
-                self.assertEqual(request("/Facebooknotify/api/admin",
+                self.assertEqual(request("/notify/api/admin",
                                          "scout.example.com")[0], 403)
-                self.assertEqual(request("/Facebooknotify/admin",
+                self.assertEqual(request("/notify/admin",
                                          "scout.example.com")[0], 403)
-                self.assertEqual(request("/Facebooknotify/api/scans",
+                self.assertEqual(request("/notify/api/scans",
                                          "scout.example.com")[0], 200)
-                self.assertEqual(request("/Facebooknotify/api/account",
+                self.assertEqual(request("/notify/api/account",
                                          "scout.example.com",
                                          "https://another.example.com")[0], 403)
-                self.assertEqual(request("/Facebooknotify/app.js",
+                self.assertEqual(request("/notify/app.js",
                                          "scout.example.com")[0], 200)
+                self.assertEqual(request("/Facebooknotify/api/scans",
+                                         "scout.example.com")[0], 308)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -262,12 +273,12 @@ class MarketplaceWebTests(unittest.TestCase):
                     connection.close()
                     return result
 
-                status, html = request("GET", "/Facebooknotify/")
+                status, html = request("GET", "/notify/")
                 self.assertEqual(status, 200)
                 self.assertIn('data-public-writes="false"', html)
-                self.assertEqual(request("GET", "/Facebooknotify/api/account")[0], 403)
-                self.assertEqual(request("POST", "/Facebooknotify/api/scans")[0], 403)
-                self.assertEqual(request("DELETE", "/Facebooknotify/api/searches/1")[0], 403)
+                self.assertEqual(request("GET", "/notify/api/account")[0], 403)
+                self.assertEqual(request("POST", "/notify/api/scans")[0], 403)
+                self.assertEqual(request("DELETE", "/notify/api/searches/1")[0], 403)
             finally:
                 server.shutdown()
                 server.server_close()

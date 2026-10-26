@@ -13,7 +13,7 @@ python marketplace_web.py --port 8765
 
 Open [the local site](http://127.0.0.1:8765/). Chrome and a matching ChromeDriver are required for live scans. Selenium Manager can obtain the driver on first use. Facebook browsing uses the computer's direct connection, with no proxy. Leave the server running for queued and scheduled scans. The scheduler is a backend thread in the web server, so only one server instance should run against the same database.
 
-For the existing Cloudflare route at `https://app.thedeveloperpaul.com/Facebooknotify/`, start the server with:
+For the Cloudflare route at `https://app.thedeveloperpaul.com/notify/`, start the server with:
 
 ```powershell
 $env:SCOUT_PUBLIC_HOST = 'app.thedeveloperpaul.com'
@@ -23,7 +23,7 @@ $env:SCOUT_CF_AUD = '9d46018cd7f9357ee641888bcc3b6a8e3cd6b1a11bed64821be951df9fa
 python marketplace_web.py --port 8765
 ```
 
-The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects that path and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing is a preview, not a connected service.
+The tunnel forwards `/notify` and its subpaths to `http://127.0.0.1:8765`. The earlier `/Facebooknotify` route redirects to `/notify`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects both paths and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing is a preview, not a connected service.
 
 ## Match emails through Gmail
 
@@ -49,7 +49,7 @@ python marketplace_admin.py list
 python marketplace_admin.py remove person@example.com
 ```
 
-Admin roles are stored in `runs/marketplace.sqlite`. On the public site, only an admin's verified Cloudflare Access email can open `/Facebooknotify/admin` and `/Facebooknotify/api/admin`. The Admin link appears after login for those accounts. Admins can review all saved profiles and scans. The local `127.0.0.1` admin view remains available for development. Back up the SQLite database to preserve roles and profiles.
+Admin roles are stored in `runs/marketplace.sqlite`. On the public site, only an admin's verified Cloudflare Access email can open `/notify/admin` and `/notify/api/admin`. The Admin link appears after login for those accounts. Admins can review all saved profiles and scans. The local `127.0.0.1` admin view remains available for development. Back up the SQLite database to preserve roles and profiles.
 
 ## What a scan does
 

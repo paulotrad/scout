@@ -70,7 +70,7 @@ class MarketplaceEmailTests(unittest.TestCase):
             self.assertIn("Desk", sent[0][2])
             self.assertIn("FREE", sent[0][2])
             self.assertIn("$20.00", sent[0][2])
-            self.assertIn("https://scout.example.com/Facebooknotify/scan/scan-chair#item-",
+            self.assertIn("https://scout.example.com/notify/scan/scan-chair#item-",
                           sent[0][2])
             self.assertEqual(email_status(db)["sent"], 1)
             self.assertFalse(finish_email_scan(second, db))

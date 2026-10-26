@@ -62,7 +62,7 @@ def _public_base_url() -> str:
     host = os.environ.get("SCOUT_PUBLIC_HOST", "").strip().lower()
     if not re.fullmatch(r"[a-z0-9.-]+", host):
         return ""
-    return f"https://{host}/Facebooknotify"
+    return f"https://{host}/notify"
 
 
 def _summary_text(rows: list[dict], base_url: str) -> tuple[str, str]:
