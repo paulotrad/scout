@@ -210,6 +210,7 @@ function adminAccount(profile) {
         <div><span class="stat-label">Daily scan times</span><strong>${esc(slots)}</strong><small>${esc(profile.timezone)}</small></div>
         <div><span class="stat-label">Next scheduled scan</span><strong>${esc(prettyDateInZone(profile.next_run_at, profile.timezone))}</strong></div>
         <div><span class="stat-label">Search terms</span><strong>${esc((profile.terms || []).join(", "))}</strong></div>
+        <div><span class="stat-label">Email notifications</span><strong>${profile.email_notifications_enabled === false ? "Off" : "On"}</strong></div>
       </div>
       <h3>Scans by area</h3>
       <p class="form-help">Older scans with the same ZIP and radius are shown as area matches when account ownership was not recorded.</p>
@@ -415,6 +416,12 @@ async function showHome() {
                 <span><strong>Plus preview</strong><small>Proposed $10 / month</small><span>Each keyword scans at 7:00 a.m. and noon.</span></span></label>
             </div>
             <p class="form-help">Plus is a free demo preview today. No payment or subscription is created.</p>
+            <div class="email-notification-setting">
+              <label for="plan-email-notifications"><input id="plan-email-notifications" type="checkbox"
+                ${account.email_notifications_enabled !== false ? "checked" : ""}>
+                <span><strong>Email me new matches</strong><small>Send one summary when a scan finds new items matching my saved criteria.</small></span></label>
+              <p class="form-help">Turning this off stops email summaries. Matches still appear in Scout.</p>
+            </div>
             <div class="plan-fields">
               <div class="field"><label for="plan-zip">Default ZIP code</label>
                 <input id="plan-zip" inputmode="numeric" pattern="[0-9]{5}" maxlength="5" required value="${esc(account.zip_code)}"></div>
@@ -600,6 +607,7 @@ async function showHome() {
             minimum_grade: document.getElementById("plan-grade").value,
             timezone: document.getElementById("plan-timezone").value,
             plan: document.querySelector('input[name="plan"]:checked').value,
+            email_notifications_enabled: document.getElementById("plan-email-notifications").checked,
             ...(emailMode ? {email: selectedEmail()} : {})
           })
         });
@@ -888,7 +896,8 @@ async function pollScanQueue(id) {
 }
 
 if (publicReadOnly && !scanPath) showPublicHome();
-else if (pagePath === "/admin" || location.hash === "#admin") showAdmin();
+else if (pagePath === "/admin") showAdmin();
+else if (pagePath === "/" && location.hash === "#admin") location.replace(appPath("/admin"));
 else if (scanPath) showScan(scanPath[1]);
 else showHome();
 

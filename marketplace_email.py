@@ -32,9 +32,10 @@ def prepare_email_batch(account_id: str, batch_key: str, expected_scans: int,
     if not _BATCH_KEY.fullmatch(batch_key) or not 1 <= expected_scans <= 25:
         raise ValueError("Invalid email batch")
     with closing(_connect(db_path)) as db, db:
-        profile = db.execute("SELECT email FROM account_profiles WHERE id = ?",
+        profile = db.execute("SELECT email, email_notifications_enabled "
+                             "FROM account_profiles WHERE id = ?",
                              (account_id,)).fetchone()
-        if not profile or not profile["email"]:
+        if not profile or not profile["email"] or not profile["email_notifications_enabled"]:
             return False
         recipient = normalize_email(profile["email"])
         db.execute("""
@@ -97,10 +98,17 @@ def finish_email_scan(scan: dict, db_path: Path = ALERT_DB) -> bool:
         return False
     with closing(_connect(db_path)) as db, db:
         batch = db.execute("""
-            SELECT recipient, expected_scans, closed_at FROM email_batches
-            WHERE account_id = ? AND batch_key = ?
+            SELECT b.recipient, b.expected_scans, b.closed_at,
+                   p.email_notifications_enabled
+            FROM email_batches b JOIN account_profiles p ON p.id = b.account_id
+            WHERE b.account_id = ? AND b.batch_key = ?
         """, (account_id, batch_key)).fetchone()
         if not batch or batch["closed_at"]:
+            return False
+        if not batch["email_notifications_enabled"]:
+            db.execute("UPDATE email_batches SET closed_at = ? "
+                       "WHERE account_id = ? AND batch_key = ?",
+                       (_now(), account_id, batch_key))
             return False
         matched_ids = {row[0] for row in db.execute("""
             SELECT a.listing_id FROM match_alerts a
@@ -209,10 +217,12 @@ def deliver_pending_summaries(db_path: Path = ALERT_DB,
     try:
         with closing(_connect(db_path)) as db:
             rows = db.execute("""
-                SELECT id, recipient, subject, body_text, attempt_count
-                FROM email_outbox
-                WHERE sent_at IS NULL AND next_attempt_at <= ?
-                ORDER BY created_at, id LIMIT 20
+                SELECT o.id, o.recipient, o.subject, o.body_text, o.attempt_count
+                FROM email_outbox o
+                JOIN account_profiles p ON p.id = o.account_id
+                WHERE o.sent_at IS NULL AND o.next_attempt_at <= ?
+                  AND p.email_notifications_enabled = 1
+                ORDER BY o.created_at, o.id LIMIT 20
             """, (_now(),)).fetchall()
         for row in rows:
             try:

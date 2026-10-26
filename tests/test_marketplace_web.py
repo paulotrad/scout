@@ -223,7 +223,8 @@ class MarketplaceWebTests(unittest.TestCase):
 
                 status, html = request("/Facebooknotify/", "scout.example.com")
                 self.assertEqual(status, 200)
-                self.assertIn('href="/Facebooknotify/styles.css"', html)
+                self.assertIn('href="/Facebooknotify/styles.css?v=20261026-7"', html)
+                self.assertIn('href="/Facebooknotify/admin"', html)
                 self.assertIn('data-public-writes="true"', html)
                 self.assertEqual(request("/", "scout.example.com")[0], 403)
                 self.assertEqual(request("/Facebooknotify/api/admin",

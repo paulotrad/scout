@@ -29,6 +29,8 @@ The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765
 
 Scout groups the keyword scans in one watchlist run into a single email to that profile's verified address. It creates an email only when at least one **new** physical item passes the saved keyword, price, radius, and condition checks. A run with no new matches sends nothing. Failed keyword scans do not prevent a summary of matches from the other scans. Email is stored in a retryable SQLite outbox before delivery.
 
+Each profile has an **Email me new matches** checkbox in its plan settings. Existing profiles start with it on. Turning it off removes unsent summaries and prevents new ones; in-app match alerts continue. Turning it back on applies to future scan runs.
+
 The sender is `fca.21050@gmail.com`. To activate it on this Windows computer:
 
 1. Turn on [Google 2-Step Verification](https://myaccount.google.com/security) for `fca.21050@gmail.com` if needed, then create a dedicated [Google app password](https://myaccount.google.com/apppasswords) named for Scout. Google sign-in through Cloudflare does not grant Gmail sending access.

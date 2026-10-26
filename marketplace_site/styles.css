@@ -65,6 +65,12 @@ h3 { font-size: 18px; letter-spacing: -.025em; }
 .plan-card strong { font-size: 18px; }
 .plan-card small { font-weight: 750; color: var(--teal); }
 .plan-card span span { color: var(--muted); font-size: 13px; }
+.email-notification-setting { margin-top: 22px; padding: 16px; border: 1px solid #cdd9df; border-radius: 13px; background: #f7faf9; }
+.email-notification-setting label { display: flex; align-items: flex-start; gap: 12px; cursor: pointer; }
+.email-notification-setting input { width: 18px; height: 18px; margin: 2px 0 0; accent-color: var(--teal); }
+.email-notification-setting span { display: grid; gap: 3px; }
+.email-notification-setting small { color: var(--muted); }
+.email-notification-setting .form-help { margin: 10px 0 0 30px; }
 .plan-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 15px; margin-top: 24px; }
 .plan-fields select, .plan-bottom select { display: block; width: 100%; min-height: 46px; padding: 10px 13px; background: #fbfcfc; border: 1px solid #cdd9df; border-radius: 10px; color: var(--ink); }
 .terms-field { margin-top: 20px; }

@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS account_profiles (
     search_id INTEGER NOT NULL REFERENCES saved_searches(id) ON DELETE CASCADE,
     plan TEXT NOT NULL,
     timezone TEXT NOT NULL,
+    email_notifications_enabled INTEGER NOT NULL DEFAULT 1 CHECK(email_notifications_enabled IN (0, 1)),
     configured_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS account_roles (
@@ -130,6 +131,9 @@ def _connect(db_path: Path = ALERT_DB) -> sqlite3.Connection:
     profile_columns = {row[1] for row in db.execute("PRAGMA table_info(account_profiles)")}
     if "email" not in profile_columns:
         db.execute("ALTER TABLE account_profiles ADD COLUMN email TEXT")
+    if "email_notifications_enabled" not in profile_columns:
+        db.execute("ALTER TABLE account_profiles ADD COLUMN email_notifications_enabled "
+                   "INTEGER NOT NULL DEFAULT 1 CHECK(email_notifications_enabled IN (0, 1))")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_account_profiles_email "
                "ON account_profiles(email COLLATE NOCASE)")
     db.commit()
@@ -314,6 +318,9 @@ def validate_account(payload: dict) -> dict:
     plan = payload.get("plan", "free")
     if plan not in {"free", "plus_preview"}:
         raise ValueError("Choose Free or Plus preview")
+    email_notifications_enabled = payload.get("email_notifications_enabled", True)
+    if not isinstance(email_notifications_enabled, bool):
+        raise ValueError("Choose whether to receive email notifications")
     zone = payload.get("timezone", "America/New_York")
     if zone not in TIMEZONES:
         raise ValueError("Choose a supported US timezone")
@@ -327,7 +334,8 @@ def validate_account(payload: dict) -> dict:
         raise ValueError("Watchlist keywords must match the saved terms")
     return {**search, "terms": search["scan_keywords"],
             "watch_items": watch_items, "global_locks": locks,
-            "plan": plan, "timezone": zone}
+            "plan": plan, "timezone": zone,
+            "email_notifications_enabled": email_notifications_enabled}
 
 
 def normalize_email(value: object) -> str:
@@ -373,6 +381,7 @@ def _default_account(email: str | None = None) -> dict:
             "radius_miles": 15, "terms": ["free"],
             "minimum_grade": "any", "min_price": 0, "max_price": 1000,
             "plan": "free", "timezone": "America/New_York",
+            "email_notifications_enabled": True,
             "next_run_at": None, "account_schema_version": 3}
     account["watch_items"] = _legacy_watch_items({**account, "scan_keywords": account["terms"]})
     account["global_locks"] = {key: True for key in LOCK_FIELDS}
@@ -391,6 +400,7 @@ def _account_from_row(row: sqlite3.Row) -> dict:
                "watch_items": search["watch_items"],
                "global_locks": search["global_locks"],
                "plan": row["plan"], "timezone": row["timezone"],
+               "email_notifications_enabled": bool(row["email_notifications_enabled"]),
                "configured_at": row["configured_at"],
                "account_schema_version": 3}
     account["next_run_at"] = next_scheduled_at(account).isoformat()
@@ -405,6 +415,7 @@ def get_account(email: str | None = None, db_path: Path = ALERT_DB,
         if email is None:
             row = db.execute("""
                 SELECT p.id AS account_id, p.email, p.plan, p.timezone,
+                       p.email_notifications_enabled,
                        p.configured_at, s.*
                 FROM account_profiles p JOIN saved_searches s ON s.id = p.search_id
                 WHERE p.id = ?
@@ -412,6 +423,7 @@ def get_account(email: str | None = None, db_path: Path = ALERT_DB,
         else:
             row = db.execute("""
                 SELECT p.id AS account_id, p.email, p.plan, p.timezone,
+                       p.email_notifications_enabled,
                        p.configured_at, s.*
                 FROM account_profiles p JOIN saved_searches s ON s.id = p.search_id
                 WHERE p.email = ? COLLATE NOCASE
@@ -450,12 +462,15 @@ def save_account(payload: dict, db_path: Path = ALERT_DB,
               json.dumps(profile["global_locks"]))
     with closing(_connect(db_path)) as db, db:
         db.execute("BEGIN IMMEDIATE")
-        existing = db.execute("SELECT id, search_id FROM account_profiles "
+        existing = db.execute("SELECT id, search_id, email_notifications_enabled FROM account_profiles "
                               "WHERE email = ? COLLATE NOCASE", (email,)).fetchone()
         if existing is None and allow_legacy_claim:
-            existing = db.execute("SELECT id, search_id FROM account_profiles "
+            existing = db.execute("SELECT id, search_id, email_notifications_enabled FROM account_profiles "
                                   "WHERE id = ? AND email IS NULL",
                                   (DEMO_ACCOUNT,)).fetchone()
+        notifications_enabled = (profile["email_notifications_enabled"]
+                                 if "email_notifications_enabled" in payload or not existing
+                                 else bool(existing["email_notifications_enabled"]))
         if existing:
             db.execute("""
                 UPDATE saved_searches SET zip_code = ?, radius_miles = ?,
@@ -464,9 +479,16 @@ def save_account(payload: dict, db_path: Path = ALERT_DB,
                     watch_items_json = ?, global_locks_json = ? WHERE id = ?
             """, (*values, existing["search_id"]))
             db.execute("""
-                UPDATE account_profiles SET email = ?, plan = ?, timezone = ?
+                UPDATE account_profiles SET email = ?, plan = ?, timezone = ?,
+                    email_notifications_enabled = ?
                 WHERE id = ?
-            """, (email, profile["plan"], profile["timezone"], existing["id"]))
+            """, (email, profile["plan"], profile["timezone"],
+                  int(notifications_enabled), existing["id"]))
+            if not notifications_enabled:
+                db.execute("DELETE FROM email_outbox WHERE account_id = ? AND sent_at IS NULL",
+                           (existing["id"],))
+                db.execute("UPDATE email_batches SET closed_at = COALESCE(closed_at, ?) "
+                           "WHERE account_id = ?", (_now(), existing["id"]))
         else:
             cursor = db.execute("""
                 INSERT INTO saved_searches
@@ -477,10 +499,12 @@ def save_account(payload: dict, db_path: Path = ALERT_DB,
             """, (*values, _now()))
             db.execute("""
                 INSERT INTO account_profiles
-                    (id, email, search_id, plan, timezone, configured_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (id, email, search_id, plan, timezone,
+                     email_notifications_enabled, configured_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, ("acct-" + uuid.uuid4().hex, email, cursor.lastrowid,
-                  profile["plan"], profile["timezone"], _now()))
+                  profile["plan"], profile["timezone"],
+                  int(notifications_enabled), _now()))
     return get_account(email, db_path)
 
 
@@ -489,8 +513,11 @@ def save_demo_account(payload: dict, db_path: Path = ALERT_DB) -> dict:
     profile = validate_account(payload)
     with closing(_connect(db_path)) as db, db:
         existing = db.execute(
-            "SELECT search_id FROM account_profiles WHERE id = ?",
+            "SELECT search_id, email_notifications_enabled FROM account_profiles WHERE id = ?",
             (DEMO_ACCOUNT,)).fetchone()
+        notifications_enabled = (profile["email_notifications_enabled"]
+                                 if "email_notifications_enabled" in payload or not existing
+                                 else bool(existing["email_notifications_enabled"]))
         values = (profile["zip_code"], profile["radius_miles"],
                   json.dumps(profile["terms"]), json.dumps(profile["terms"]),
                   profile["minimum_grade"], profile["min_price"],
@@ -505,8 +532,15 @@ def save_demo_account(payload: dict, db_path: Path = ALERT_DB) -> dict:
                     watch_items_json = ?, global_locks_json = ? WHERE id = ?
             """, (*values, search_id))
             db.execute("""
-                UPDATE account_profiles SET plan = ?, timezone = ? WHERE id = ?
-            """, (profile["plan"], profile["timezone"], DEMO_ACCOUNT))
+                UPDATE account_profiles SET plan = ?, timezone = ?,
+                    email_notifications_enabled = ? WHERE id = ?
+            """, (profile["plan"], profile["timezone"],
+                  int(notifications_enabled), DEMO_ACCOUNT))
+            if not notifications_enabled:
+                db.execute("DELETE FROM email_outbox WHERE account_id = ? AND sent_at IS NULL",
+                           (DEMO_ACCOUNT,))
+                db.execute("UPDATE email_batches SET closed_at = COALESCE(closed_at, ?) "
+                           "WHERE account_id = ?", (_now(), DEMO_ACCOUNT))
         else:
             cursor = db.execute("""
                 INSERT INTO saved_searches
@@ -517,9 +551,12 @@ def save_demo_account(payload: dict, db_path: Path = ALERT_DB) -> dict:
             """, (*values, _now()))
             search_id = cursor.lastrowid
             db.execute("""
-                INSERT INTO account_profiles (id, search_id, plan, timezone, configured_at)
-                VALUES (?, ?, ?, ?, ?)
-            """, (DEMO_ACCOUNT, search_id, profile["plan"], profile["timezone"], _now()))
+                INSERT INTO account_profiles
+                    (id, search_id, plan, timezone,
+                     email_notifications_enabled, configured_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (DEMO_ACCOUNT, search_id, profile["plan"], profile["timezone"],
+                  int(notifications_enabled), _now()))
     return get_demo_account(db_path)
 
 
@@ -531,7 +568,8 @@ def list_account_profiles(db_path: Path = ALERT_DB) -> list[dict]:
     """Return configured local profiles for the admin view."""
     with closing(_connect(db_path)) as db:
         rows = db.execute("""
-            SELECT p.id AS account_id, p.email, p.plan, p.timezone, p.configured_at, s.*
+            SELECT p.id AS account_id, p.email, p.plan, p.timezone,
+                   p.email_notifications_enabled, p.configured_at, s.*
             FROM account_profiles p JOIN saved_searches s ON s.id = p.search_id
             ORDER BY p.configured_at DESC, p.id
         """).fetchall()
@@ -543,6 +581,7 @@ def list_account_profiles(db_path: Path = ALERT_DB) -> list[dict]:
             "display_name": "Demo account" if row["account_id"] == DEMO_ACCOUNT else "Local account",
             "email": row["email"], "configured": True,
             "plan": row["plan"],
+            "email_notifications_enabled": bool(row["email_notifications_enabled"]),
             "subscription_status": "preview" if row["plan"] == "plus_preview" else "free",
             "timezone": row["timezone"],
             "configured_at": row["configured_at"],

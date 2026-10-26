@@ -100,6 +100,36 @@ class MarketplaceEmailTests(unittest.TestCase):
                 "status": "failed", "keywords": ["desk"]}, db))
             self.assertEqual(email_status(db)["pending"], 1)
 
+    def test_disabling_email_clears_unsent_summary_and_stops_future_batches(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+                os.environ, {"SCOUT_PUBLIC_HOST": "scout.example.com"}, clear=True):
+            db = Path(directory) / "alerts.sqlite"
+            account = save_account({"email": "buyer@example.com",
+                                    "zip_code": "21009", "radius_miles": 15,
+                                    "terms": ["chair"], "plan": "free",
+                                    "timezone": "America/New_York"}, db)
+            self.assertTrue(prepare_email_batch(account["id"], "run-before-off", 1, db))
+            scan = {"id": "scan-before-off", "account_id": account["id"],
+                    "email_batch_key": "run-before-off", "status": "complete",
+                    "keywords": ["chair"], "zip_code": "21009", "radius_miles": 15,
+                    "listings": [{"id": "chair-new", "title": "Chair", "item_type": "chair",
+                                  "listing_kind": "product", "condition_grade": "good",
+                                  "distance_miles_approx": 2, "asking_price": 0}]}
+            self.assertEqual(record_scan_matches(scan, db), 1)
+            self.assertTrue(finish_email_scan(scan, db))
+            self.assertEqual(email_status(db)["pending"], 1)
+            disabled = save_account({**account, "email_notifications_enabled": False}, db)
+            self.assertFalse(disabled["email_notifications_enabled"])
+            self.assertEqual(email_status(db)["pending"], 0)
+            self.assertFalse(prepare_email_batch(account["id"], "run-after-off", 1, db))
+            sent = []
+            self.assertEqual(deliver_pending_summaries(db, sender=lambda *_: sent.append(1)), 0)
+            self.assertEqual(sent, [])
+            enabled = save_account({**disabled, "email_notifications_enabled": True}, db)
+            self.assertTrue(enabled["email_notifications_enabled"])
+            self.assertTrue(prepare_email_batch(account["id"], "run-after-on", 1, db))
+            self.assertEqual(email_status(db)["pending"], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

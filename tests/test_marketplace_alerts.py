@@ -180,6 +180,24 @@ class MarketplaceAlertTests(unittest.TestCase):
             self.assertEqual(second["terms"], ["free"])
             self.assertEqual(len(list_account_profiles(db)), 2)
 
+    def test_email_notification_setting_is_per_profile_and_survives_other_edits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            first = open_account("first@example.com", db)
+            second = open_account("second@example.com", db)
+            self.assertTrue(first["email_notifications_enabled"])
+            disabled = save_account({**first, "email_notifications_enabled": False}, db)
+            self.assertFalse(disabled["email_notifications_enabled"])
+            edited = save_account({key: value for key, value in disabled.items()
+                                   if key != "email_notifications_enabled"}, db)
+            self.assertFalse(edited["email_notifications_enabled"])
+            self.assertFalse(get_account("first@example.com", db)["email_notifications_enabled"])
+            self.assertTrue(get_account("second@example.com", db)["email_notifications_enabled"])
+            self.assertTrue(next(profile for profile in list_account_profiles(db)
+                                 if profile["id"] == second["id"])["email_notifications_enabled"])
+            with self.assertRaises(ValueError):
+                save_account({**edited, "email_notifications_enabled": "false"}, db)
+
     def test_per_keyword_settings_and_global_locks_survive_save(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "alerts.sqlite"
