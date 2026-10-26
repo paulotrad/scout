@@ -66,6 +66,39 @@ CREATE TABLE IF NOT EXISTS account_roles (
     role TEXT NOT NULL CHECK(role = 'admin'),
     granted_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS email_batches (
+    account_id TEXT NOT NULL,
+    batch_key TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    expected_scans INTEGER NOT NULL,
+    created_at TEXT NOT NULL,
+    closed_at TEXT,
+    PRIMARY KEY (account_id, batch_key)
+);
+CREATE TABLE IF NOT EXISTS email_batch_scans (
+    account_id TEXT NOT NULL,
+    batch_key TEXT NOT NULL,
+    scan_id TEXT NOT NULL,
+    result_json TEXT NOT NULL,
+    completed_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, batch_key, scan_id),
+    FOREIGN KEY (account_id, batch_key)
+        REFERENCES email_batches(account_id, batch_key) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS email_outbox (
+    id INTEGER PRIMARY KEY,
+    account_id TEXT NOT NULL,
+    batch_key TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    subject TEXT NOT NULL,
+    body_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    next_attempt_at TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    sent_at TEXT,
+    UNIQUE(account_id, batch_key)
+);
 CREATE TABLE IF NOT EXISTS scheduled_slots (
     account_id TEXT NOT NULL,
     slot_key TEXT NOT NULL,

@@ -7,12 +7,14 @@ import tempfile
 import threading
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from marketplace_scan_runner import validate_settings
 from marketplace_alerts import (
     get_account, grant_admin, is_admin_email, list_admin_emails, open_account,
+    record_scan_matches, save_account,
 )
+from marketplace_email import email_status, finish_email_scan, prepare_email_batch
 import marketplace_web
 from marketplace_web import public_listing, public_scan, result_path, scan_stage_progress
 
@@ -475,7 +477,9 @@ class MarketplaceWebTests(unittest.TestCase):
         self.assertEqual(result["id"], "first")
         start.assert_called_once_with({"zip_code": "21009", "radius_miles": 15,
             "keywords": ["couch"], "watch_item": items[0], "mode": "scheduled"},
-            account_id="demo")
+            account_id="demo", email_batch_key=ANY, email_batch_size=2)
+        self.assertEqual(claim.call_args.args[0].split(":item:")[0],
+                         start.call_args.kwargs["email_batch_key"])
         self.assertEqual(claim.call_count, 1)
         self.assertEqual(claim.call_args.kwargs["watch_item"], items[1])
 
@@ -520,6 +524,53 @@ class MarketplaceWebTests(unittest.TestCase):
                                             "keywords": ["free"]})
                 self.assertTrue(matched.wait(2))
 
+    def test_owned_completed_scan_queues_match_email(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "alerts.sqlite"
+            account = save_account({"email": "buyer@example.com",
+                                    "zip_code": "21009", "radius_miles": 15,
+                                    "terms": ["chair"], "plan": "free",
+                                    "timezone": "America/New_York"}, db)
+            manifest = {"id": "scan-email", "account_id": account["id"],
+                        "zip_code": "21009", "radius_miles": 15,
+                        "keywords": ["chair"], "status": "complete"}
+            listing = {"id": "chair-1", "title": "Wood chair",
+                       "item_type": "chair", "listing_kind": "product",
+                       "condition_grade": "good", "distance_miles_approx": 2,
+                       "asking_price": 0}
+            finished = threading.Event()
+
+            def finish(scan):
+                try:
+                    return finish_email_scan(scan, db)
+                finally:
+                    finished.set()
+
+            with (patch.dict("os.environ", {"SCOUT_PUBLIC_HOST": "scout.example.com"}),
+                  patch.object(marketplace_web, "ROOT", root),
+                  patch.object(marketplace_web, "create_manifest", return_value=manifest),
+                  patch.object(marketplace_web, "save_manifest"),
+                  patch.object(marketplace_web, "run_scan", return_value=manifest),
+                  patch.object(marketplace_web, "public_scan",
+                               side_effect=lambda completed:
+                               {**completed, "listings": [listing]}),
+                  patch.object(marketplace_web, "prepare_email_batch",
+                               side_effect=lambda account_id, key, size:
+                               prepare_email_batch(account_id, key, size, db)),
+                  patch.object(marketplace_web, "record_scan_matches",
+                               side_effect=lambda scan: record_scan_matches(scan, db)),
+                  patch.object(marketplace_web, "finish_email_scan",
+                               side_effect=finish),
+                  patch.object(marketplace_web, "deliver_pending_summaries",
+                               return_value=0),
+                  patch.object(marketplace_web, "active_scan_id", None)):
+                marketplace_web.start_scan({"zip_code": "21009", "radius_miles": 15,
+                                            "keywords": ["chair"]},
+                                           account_id=account["id"])
+                self.assertTrue(finished.wait(2))
+            self.assertEqual(email_status(db)["pending"], 1)
+
     def test_due_slot_starts_one_bounded_scheduled_scan(self):
         couch = {"term": "couch", "zip_code": "21009", "radius_miles": 15,
                  "min_price": 0, "max_price": 100}
@@ -551,7 +602,8 @@ class MarketplaceWebTests(unittest.TestCase):
                 "zip_code": "21009", "radius_miles": 15,
                 "keywords": ["couch"], "watch_item": couch,
                 "mode": "scheduled"},
-                account_id="demo")
+                account_id="demo", email_batch_key="2026-10-23-07",
+                email_batch_size=2)
             finish.assert_called_once_with("2026-10-23-07:item:one", "scan-scheduled",
                                            account_id="demo")
 

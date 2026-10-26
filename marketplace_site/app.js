@@ -267,6 +267,12 @@ async function showAdmin() {
       <div class="section-heading"><div><p class="eyebrow">Access</p><h2 id="admin-roles-title">Admins</h2></div></div>
       <div class="panel"><p>${overview.admin_emails.map(esc).join(" · ")}</p></div>
     </section>` : ""}
+    ${overview.email_delivery ? `<section class="admin-section" aria-labelledby="admin-email-title">
+      <div class="section-heading"><div><p class="eyebrow">Notifications</p><h2 id="admin-email-title">Match emails</h2></div></div>
+      <div class="panel"><p>${overview.email_delivery.configured ? "SMTP ready" : "Gmail SMTP setup needed"}
+        · ${esc(overview.email_delivery.pending)} pending · ${esc(overview.email_delivery.sent)} sent</p>
+        <p class="form-help">Scout sends one email after a scan batch only when new items meet the saved criteria.</p></div>
+    </section>` : ""}
     <section class="admin-section" aria-labelledby="admin-accounts-title">
       <div class="section-heading"><div><p class="eyebrow">Search areas</p><h2 id="admin-accounts-title">Profiles</h2></div>
         <p>Expand a profile to review its scans.</p></div>

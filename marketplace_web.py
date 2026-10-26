@@ -23,6 +23,10 @@ from marketplace_alerts import (
     watch_slot_key,
 )
 from marketplace_db import DEFAULT_DB, get_image
+from marketplace_email import (
+    deliver_pending_summaries, email_status, finish_email_scan,
+    prepare_email_batch,
+)
 from marketplace_access import AccessDenied, verify_access_token
 from marketplace_listing_copy import display_title
 from marketplace_price import display_price
@@ -330,7 +334,9 @@ def public_scan(manifest: dict) -> dict:
     }
 
 
-def start_scan(payload: dict, *, account_id: str | None = None) -> dict:
+def start_scan(payload: dict, *, account_id: str | None = None,
+               email_batch_key: str | None = None,
+               email_batch_size: int = 1) -> dict:
     global active_scan_id
     watch_item = payload.get("watch_item")
     if watch_item and (not isinstance(watch_item, dict) or
@@ -343,6 +349,11 @@ def start_scan(payload: dict, *, account_id: str | None = None) -> dict:
             payload.get("zip_code"), payload.get("radius_miles"),
             payload.get("keywords"), mode=payload.get("mode", "manual"),
             account_id=account_id)
+        if account_id:
+            batch_key = email_batch_key or manifest["id"]
+            if prepare_email_batch(account_id, batch_key, email_batch_size):
+                manifest["email_batch_key"] = batch_key
+                save_manifest(manifest)
         if watch_item:
             manifest["watch_term"] = watch_item["term"]
             manifest["watch_item"] = watch_item
@@ -361,18 +372,26 @@ def start_scan(payload: dict, *, account_id: str | None = None) -> dict:
         global active_scan_id
         try:
             completed = run_scan(manifest["id"])
-            if completed["status"] == "complete":
-                try:
-                    record_scan_matches(public_scan(completed))
-                except Exception as error:
-                    print(f"Could not create alerts for {manifest['id']}: {error}",
-                          flush=True)
+            complete_scan_notifications(completed)
         finally:
             with active_lock:
                 active_scan_id = None
 
     threading.Thread(target=worker, name=manifest["id"], daemon=True).start()
     return manifest
+
+
+def complete_scan_notifications(completed: dict) -> None:
+    """Persist matches first, then close the digest for this scan's batch."""
+    try:
+        scan = public_scan(completed) if completed["status"] == "complete" else completed
+        if completed["status"] == "complete":
+            record_scan_matches(scan)
+        if finish_email_scan(scan):
+            deliver_pending_summaries()
+    except Exception as error:
+        print(f"Could not create alerts or email for {completed.get('id')}: {error}",
+              flush=True)
 
 
 def resume_interrupted_scan(scan_id: str) -> None:
@@ -390,12 +409,7 @@ def resume_interrupted_scan(scan_id: str) -> None:
         global active_scan_id
         try:
             completed = run_scan(scan_id)
-            if completed["status"] == "complete":
-                try:
-                    record_scan_matches(public_scan(completed))
-                except Exception as error:
-                    print(f"Could not create alerts for {scan_id}: {error}",
-                          flush=True)
+            complete_scan_notifications(completed)
         finally:
             with active_lock:
                 active_scan_id = None
@@ -432,7 +446,10 @@ def start_next_pending(profiles: dict[str, dict] | None = None) -> str | None:
                 "radius_miles": item["radius_miles"] if item else account["radius_miles"],
                 "keywords": [item["term"]] if item else account["terms"],
                 "watch_item": item, "mode": "scheduled",
-            }, account_id=account_id)
+            }, account_id=account_id,
+                email_batch_key=slot.split(":item:", 1)[0],
+                email_batch_size=(len(account.get("watch_items") or [1])
+                                  if ":item:" in slot else 1))
             finish_slot(slot, manifest["id"], account_id=account_id)
             return manifest["id"]
         except RuntimeError:
@@ -455,7 +472,9 @@ def queue_account_scans(account: dict) -> dict:
                            "radius_miles": first["radius_miles"],
                            "keywords": [first["term"]],
                            "watch_item": first, "mode": "scheduled"},
-                          account_id=account["id"])
+                          account_id=account["id"],
+                          email_batch_key=batch,
+                          email_batch_size=len(items))
     for item in items[1:]:
         claim_slot(watch_slot_key(batch, item["term"]),
                    account_id=account["id"], watch_item=item)
@@ -469,6 +488,10 @@ def scheduler_loop(stop: threading.Event) -> None:
             run_due_schedule()
         except Exception as error:
             print(f"Scheduled scan did not start: {error}", flush=True)
+        try:
+            deliver_pending_summaries()
+        except Exception as error:
+            print(f"Email delivery did not run: {error}", flush=True)
         stop.wait(30)
 
 
@@ -478,6 +501,13 @@ def mark_interrupted_scans() -> None:
             manifest["status"] = "interrupted"
             manifest["stage"] = "Interrupted when the local server stopped"
             save_manifest(manifest)
+
+
+def recover_email_notifications() -> None:
+    for manifest in scan_manifests():
+        if manifest.get("email_batch_key") and manifest.get("status") in {
+                "complete", "failed"}:
+            complete_scan_notifications(manifest)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -590,7 +620,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._error(400, str(error))
         if path == "/api/admin":
             return self._json(200, {**admin_overview(),
-                                    "admin_emails": list_admin_emails()})
+                                    "admin_emails": list_admin_emails(),
+                                    "email_delivery": email_status()})
         if path == "/api/searches":
             return self._json(200, {"searches": list_searches()})
         if path == "/api/alerts":
@@ -760,6 +791,7 @@ def main() -> None:
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     mark_interrupted_scans()
+    recover_email_notifications()
     if resume_id := os.environ.get("SCOUT_RESUME_SCAN_ID"):
         resume_interrupted_scan(resume_id)
     scheduler_stop = threading.Event()

@@ -23,7 +23,19 @@ $env:SCOUT_CF_AUD = '9d46018cd7f9357ee641888bcc3b6a8e3cd6b1a11bed64821be951df9fa
 python marketplace_web.py --port 8765
 ```
 
-The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects that path and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing and email delivery are previews, not connected services.
+The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects that path and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing is a preview, not a connected service.
+
+## Match emails through Gmail
+
+Scout groups the keyword scans in one watchlist run into a single email to that profile's verified address. It creates an email only when at least one **new** physical item passes the saved keyword, price, radius, and condition checks. A run with no new matches sends nothing. Failed keyword scans do not prevent a summary of matches from the other scans. Email is stored in a retryable SQLite outbox before delivery.
+
+The sender is `fca.21050@gmail.com`. To activate it on this Windows computer:
+
+1. Turn on [Google 2-Step Verification](https://myaccount.google.com/security) for `fca.21050@gmail.com` if needed, then create a dedicated [Google app password](https://myaccount.google.com/apppasswords) named for Scout. Google sign-in through Cloudflare does not grant Gmail sending access.
+2. In PowerShell, from this folder, run `./start_scout.ps1 -SetGmailPassword`. The script prompts for the app password without displaying it and stores it encrypted for this Windows user in the ignored `runs/gmail_smtp_password.xml` file. Do not use your regular Google password or put the app password in Git, chat, or a `.env` file.
+3. The script checks the Gmail SMTP login **without sending an email**, then restarts Scout if no scan is active. Afterward, the Admin page shows `SMTP ready`. On later restarts, run `./start_scout.ps1` to reuse the saved encrypted password. Run with `-SetGmailPassword` again if you rotate it.
+
+Gmail SMTP uses `smtp.gmail.com:587` with STARTTLS and the full Gmail address as username. The password is required only on the Scout computer. Until it is configured, matching summaries remain pending in SQLite and are sent after a sender is connected. Scout does not send a test email or a no-match email.
 
 ## Admin roles
 
