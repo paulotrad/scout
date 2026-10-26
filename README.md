@@ -25,6 +25,18 @@ python marketplace_web.py --port 8765
 
 The tunnel forwards `/Facebooknotify` and its subpaths to `http://127.0.0.1:8765`. The Cloudflare Access self-hosted application `Scout Facebook Marketplace` protects that path and uses the `Scout-Google-Auth` identity provider. Scout validates the Access application JWT signature, issuer, audience, and expiration on every public request. The verified email selects that user's profile, scans, and alerts; browser-supplied email values are ignored. The local `127.0.0.1` site remains a development view. Billing and email delivery are previews, not connected services.
 
+## Admin roles
+
+On the Scout computer, grant or remove admin access using the verified Google email address:
+
+```powershell
+python marketplace_admin.py add person@example.com
+python marketplace_admin.py list
+python marketplace_admin.py remove person@example.com
+```
+
+Admin roles are stored in `runs/marketplace.sqlite`. On the public site, only an admin's verified Cloudflare Access email can open `/Facebooknotify/admin` and `/Facebooknotify/api/admin`. The Admin link appears after login for those accounts. Admins can review all saved profiles and scans. The local `127.0.0.1` admin view remains available for development. Back up the SQLite database to preserve roles and profiles.
+
 ## What a scan does
 
 Each saved search has its own keyword, ZIP code, radius, listed-price range, and minimum condition. The free plan schedules a daily 7 a.m. scan in the profile's selected timezone; the premium preview also schedules noon. A manual scan can be started from the site. Searches are queued and run one at a time.

@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS account_profiles (
     timezone TEXT NOT NULL,
     configured_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS account_roles (
+    email TEXT PRIMARY KEY COLLATE NOCASE,
+    role TEXT NOT NULL CHECK(role = 'admin'),
+    granted_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS scheduled_slots (
     account_id TEXT NOT NULL,
     slot_key TEXT NOT NULL,
@@ -299,6 +304,34 @@ def normalize_email(value: object) -> str:
     if len(email) > 254 or not EMAIL.fullmatch(email):
         raise ValueError("Enter a valid email address")
     return email
+
+
+def is_admin_email(email: str, db_path: Path = ALERT_DB) -> bool:
+    """Only a verified Access email should be passed to this role lookup."""
+    email = normalize_email(email)
+    with closing(_connect(db_path)) as db:
+        return db.execute("SELECT 1 FROM account_roles WHERE email = ? AND role = 'admin'",
+                          (email,)).fetchone() is not None
+
+
+def grant_admin(email: str, db_path: Path = ALERT_DB) -> None:
+    email = normalize_email(email)
+    with closing(_connect(db_path)) as db, db:
+        db.execute("INSERT OR IGNORE INTO account_roles (email, role, granted_at) "
+                   "VALUES (?, 'admin', ?)", (email, _now()))
+
+
+def revoke_admin(email: str, db_path: Path = ALERT_DB) -> bool:
+    email = normalize_email(email)
+    with closing(_connect(db_path)) as db, db:
+        return db.execute("DELETE FROM account_roles WHERE email = ? AND role = 'admin'",
+                          (email,)).rowcount > 0
+
+
+def list_admin_emails(db_path: Path = ALERT_DB) -> list[str]:
+    with closing(_connect(db_path)) as db:
+        return [row[0] for row in db.execute(
+            "SELECT email FROM account_roles WHERE role = 'admin' ORDER BY email")]
 
 
 def _default_account(email: str | None = None) -> dict:

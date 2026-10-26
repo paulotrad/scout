@@ -18,6 +18,10 @@ if (publicReadOnly) {
   }
 }
 if (publicHost) document.querySelector(".admin-link").style.display = "none";
+const showAdminLink = account => {
+  if (publicHost) document.querySelector(".admin-link").style.display =
+    account?.role === "admin" ? "" : "none";
+};
 
 const esc = value => String(value ?? "").replace(/[&<>"']/g, char => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
@@ -218,17 +222,16 @@ function adminAccount(profile) {
 }
 
 async function showAdmin() {
-  if (publicHost) {
-    app.innerHTML = '<div class="panel empty">Admin is available only on the Scout computer.</div>';
-    return;
-  }
   try {
-    const [history, matches] = await Promise.all([api("/api/scans"), api("/api/alerts")]);
+    const [history, matches, account] = await Promise.all([
+      api("/api/scans"), api("/api/alerts"), publicHost ? api("/api/account") : Promise.resolve(null)
+    ]);
+    showAdminLink(account);
     let overview;
     try {
       overview = await api("/api/admin");
     } catch (failure) {
-      if (!["Request failed (404)", "Page not found"].includes(failure.message)) throw failure;
+      if (publicHost || !["Request failed (404)", "Page not found"].includes(failure.message)) throw failure;
       // The already-running local server can serve this page before its next restart.
       const account = await api("/api/account");
       const scans = history.scans || [];
@@ -251,8 +254,8 @@ async function showAdmin() {
     fillPicker(history.scans);
     showAlertCount(matches.unread_count);
     app.innerHTML = `<section class="admin-hero">
-      <p class="eyebrow">Local admin · open preview</p><h1>Accounts and scans</h1>
-      <p class="lead">See each saved profile, its search area, schedule, and scans. This local preview has no paid billing yet.</p>
+      <p class="eyebrow">${publicHost ? "Admin · verified Google login" : "Local admin · open preview"}</p><h1>Accounts and scans</h1>
+      <p class="lead">See each saved profile, its search area, schedule, and scans. Paid billing is not connected yet.</p>
     </section>
     <div class="admin-stats">
       <div class="panel stat"><span class="stat-label">Saved profiles</span><strong class="stat-value">${esc(overview.profile_count)}</strong></div>
@@ -260,6 +263,10 @@ async function showAdmin() {
       <div class="panel stat"><span class="stat-label">Plus previews</span><strong class="stat-value">${esc(overview.preview_count)}</strong></div>
       <div class="panel stat"><span class="stat-label">Saved scans</span><strong class="stat-value">${esc(overview.total_scan_count)}</strong></div>
     </div>
+    ${overview.admin_emails?.length ? `<section class="admin-section" aria-labelledby="admin-roles-title">
+      <div class="section-heading"><div><p class="eyebrow">Access</p><h2 id="admin-roles-title">Admins</h2></div></div>
+      <div class="panel"><p>${overview.admin_emails.map(esc).join(" · ")}</p></div>
+    </section>` : ""}
     <section class="admin-section" aria-labelledby="admin-accounts-title">
       <div class="section-heading"><div><p class="eyebrow">Search areas</p><h2 id="admin-accounts-title">Profiles</h2></div>
         <p>Expand a profile to review its scans.</p></div>
@@ -355,6 +362,7 @@ async function showHome() {
       accountApi("/api/account"), accountApi("/api/alerts")
     ]);
     activeAccount = account;
+    showAdminLink(account);
     email = account.email || email;
     const lastManualScan = history.scans.find(scan => scan.mode === "manual");
     const settings = {
@@ -751,7 +759,9 @@ async function showScan(id) {
       publicReadOnly ? Promise.resolve(null) : accountApi("/api/account")
     ]);
     activeAccount = account;
-    if (!publicReadOnly && !history.scans.some(saved => saved.id === id)) {
+    showAdminLink(account);
+    if (!publicReadOnly && account?.role !== "admin" &&
+        !history.scans.some(saved => saved.id === id)) {
       fillPicker(history.scans);
       app.innerHTML = `<div class="panel empty">This scan is not in the opened email profile.
         <p><a class="open-link" href="${appPath("/")}">Open your searches</a></p></div>`;

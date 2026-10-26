@@ -10,12 +10,85 @@ from http.server import ThreadingHTTPServer
 from unittest.mock import patch
 
 from marketplace_scan_runner import validate_settings
-from marketplace_alerts import get_account, open_account
+from marketplace_alerts import (
+    get_account, grant_admin, is_admin_email, list_admin_emails, open_account,
+)
 import marketplace_web
 from marketplace_web import public_listing, public_scan, result_path, scan_stage_progress
 
 
 class MarketplaceWebTests(unittest.TestCase):
+    def test_public_admin_requires_verified_email_with_admin_role(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            grant_admin("admin@example.com", db)
+            open_account("member@example.com", db)
+
+            def verified(token, _team, _aud):
+                if not token:
+                    raise marketplace_web.AccessDenied("Cloudflare Access login is required")
+                return {"email": token, "subject": "verified-user"}
+
+            with (patch.object(marketplace_web, "PUBLIC_HOST", "scout.example.com"),
+                  patch.object(marketplace_web, "PUBLIC_WRITES", True),
+                  patch.object(marketplace_web, "verify_access_token",
+                               side_effect=verified),
+                  patch.object(marketplace_web, "is_admin_email",
+                               side_effect=lambda email: is_admin_email(email, db)),
+                  patch.object(marketplace_web, "list_admin_emails",
+                               side_effect=lambda: list_admin_emails(db)),
+                  patch.object(marketplace_web, "get_account",
+                               side_effect=lambda email=None, **kw: get_account(email, db, **kw)),
+                  patch.object(marketplace_web, "admin_overview",
+                               return_value={"accounts": [], "unassigned_scans": []}),
+                  patch.object(marketplace_web, "read_manifest",
+                               return_value={"id": "scan-other"}),
+                  patch.object(marketplace_web, "public_scan",
+                               return_value={"id": "scan-other"}),
+                  patch.object(marketplace_web.Handler, "log_message")):
+                server = ThreadingHTTPServer(("127.0.0.1", 0),
+                                             marketplace_web.Handler)
+                worker = threading.Thread(target=server.serve_forever, daemon=True)
+                worker.start()
+                try:
+                    def request(path, token=None, spoof=None):
+                        connection = HTTPConnection("127.0.0.1", server.server_port)
+                        headers = {"Host": "scout.example.com"}
+                        if token:
+                            headers["Cf-Access-Jwt-Assertion"] = token
+                        if spoof:
+                            headers["X-Scout-Email"] = spoof
+                        connection.request("GET", "/Facebooknotify" + path,
+                                           headers=headers)
+                        response = connection.getresponse()
+                        body = response.read()
+                        result = response.status, (json.loads(body)
+                                                   if response.getheader("Content-Type", "").startswith("application/json")
+                                                   else body.decode("utf-8"))
+                        connection.close()
+                        return result
+
+                    self.assertEqual(request("/api/admin")[0], 401)
+                    self.assertEqual(request("/api/admin", "member@example.com",
+                                             spoof="admin@example.com")[0], 403)
+                    self.assertEqual(request("/admin", "member@example.com")[0], 403)
+                    status, overview = request("/api/admin", "admin@example.com")
+                    self.assertEqual(status, 200)
+                    self.assertEqual(overview["admin_emails"], ["admin@example.com"])
+                    self.assertEqual(request("/admin", "admin@example.com")[0], 200)
+                    self.assertEqual(request("/api/account", "admin@example.com")[1]["role"],
+                                     "admin")
+                    self.assertEqual(request("/api/account", "member@example.com")[1]["role"],
+                                     "user")
+                    self.assertEqual(request("/api/scans/scan-other", "member@example.com")[0],
+                                     404)
+                    self.assertEqual(request("/api/scans/scan-other", "admin@example.com")[0],
+                                     200)
+                finally:
+                    server.shutdown()
+                    server.server_close()
+                    worker.join(timeout=2)
+
     def test_verified_public_profiles_ignore_untrusted_email_and_scope_scans(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "alerts.sqlite"

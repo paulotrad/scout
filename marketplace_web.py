@@ -16,8 +16,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from marketplace_alerts import (
     DEMO_ACCOUNT, account_id_for_search, claim_slot, create_search,
     delete_search, due_slot, finish_slot, get_account, get_search,
-    list_account_profiles, list_alerts, list_searches, mark_read, open_account,
-    pending_slots, record_scan_matches, release_slot, save_account,
+    list_account_profiles, list_admin_emails, list_alerts, list_searches,
+    mark_read, open_account, is_admin_email, pending_slots, record_scan_matches,
+    release_slot, save_account,
     scheduled_scan_owners,
     watch_slot_key,
 )
@@ -509,7 +510,12 @@ class Handler(BaseHTTPRequestHandler):
     def _account(self, email: str | None) -> dict:
         return get_account(email, allow_legacy_claim=not self._public_request())
 
+    def _is_admin(self, identity: dict[str, str] | None) -> bool:
+        return bool(identity and is_admin_email(identity["email"]))
+
     def _owns_scan(self, scan_id: str, email: str) -> bool:
+        if self._public_request() and is_admin_email(email):
+            return True
         account = self._account(email)
         if not account["configured"]:
             return False
@@ -545,8 +551,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._error(401, str(error))
         request = urlsplit(self.path)
         path, base_path = route_path(unquote(request.path))
-        if self._public_request() and path in {"/admin", "/api/admin", "/api/searches"}:
+        if self._public_request() and path == "/api/searches":
             return self._error(403, "This page is available only on this computer")
+        if self._public_request() and path in {"/admin", "/api/admin"} and not self._is_admin(identity):
+            return self._error(403, "Admin access required")
         if self._public_request() and not PUBLIC_WRITES and path in {
                 "/setup", "/api/account", "/api/alerts"}:
             return self._error(403, "Public access is view-only")
@@ -574,11 +582,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, settings)
         if path == "/api/account":
             try:
-                return self._json(200, self._account(email))
+                account = self._account(email)
+                if identity:
+                    account = {**account, "role": "admin" if self._is_admin(identity) else "user"}
+                return self._json(200, account)
             except ValueError as error:
                 return self._error(400, str(error))
         if path == "/api/admin":
-            return self._json(200, admin_overview())
+            return self._json(200, {**admin_overview(),
+                                    "admin_emails": list_admin_emails()})
         if path == "/api/searches":
             return self._json(200, {"searches": list_searches()})
         if path == "/api/alerts":

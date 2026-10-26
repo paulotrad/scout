@@ -7,14 +7,28 @@ import unittest
 
 from marketplace_alerts import (
     claim_slot, create_search, delete_search, due_slot, finish_slot,
-    get_account, get_demo_account, item_matches, list_account_profiles,
-    list_alerts, list_searches,
+    get_account, get_demo_account, grant_admin, is_admin_email, item_matches,
+    list_account_profiles, list_admin_emails, list_alerts, list_searches,
     mark_read, next_scheduled_at, open_account, pending_slots, record_scan_matches, release_slot,
-    save_account, save_demo_account, validate_search,
+    revoke_admin, save_account, save_demo_account, validate_search,
 )
 
 
 class MarketplaceAlertTests(unittest.TestCase):
+    def test_admin_roles_are_persisted_and_case_insensitive(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            self.assertFalse(is_admin_email("person@example.com", db))
+            grant_admin(" Person@Example.com ", db)
+            grant_admin("person@example.com", db)
+            self.assertTrue(is_admin_email("PERSON@example.com", db))
+            self.assertEqual(list_admin_emails(db), ["person@example.com"])
+            self.assertTrue(revoke_admin("PERSON@example.com", db))
+            self.assertFalse(is_admin_email("person@example.com", db))
+            self.assertFalse(revoke_admin("person@example.com", db))
+            with self.assertRaises(ValueError):
+                grant_admin("not-an-email", db)
+
     def test_validates_search_settings(self):
         settings = validate_search({
             "zip_code": "21009", "radius_miles": 15,
