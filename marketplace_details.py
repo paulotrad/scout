@@ -8,15 +8,23 @@ import json
 from pathlib import Path
 import re
 import time
+from urllib.parse import urlsplit
+
+import requests
 
 from selenium.webdriver.support.ui import WebDriverWait
 
+from marketplace_atomic import write_json
 from marketplace_browser import create_driver
 from fb_marketplace import _marketplace_url
 from marketplace_db import DEFAULT_DB, store_result
 
 
-DETAIL_VERSION = "visible_details_v1"
+DETAIL_VERSION = "visible_details_v2_gallery"
+MAX_LISTING_PHOTOS = 4
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+IMAGE_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png",
+                    "image/webp": ".webp"}
 CONDITION_LINE = re.compile(r"^(?:Used\s*-\s*(?:Like New|Good|Fair)|New|For parts)$", re.I)
 STOP_LINES = {"Seller information", "Related searches", "Today's picks",
               "Message", "See more on Facebook"}
@@ -55,6 +63,67 @@ def extract_description(body_text: str) -> dict:
             "description_truncated": truncated}
 
 
+def gallery_urls(candidates: list[dict], limit: int = MAX_LISTING_PHOTOS) -> list[str]:
+    """Keep distinct visible listing photos, excluding related-item pictures."""
+    urls = []
+    seen = set()
+    for image in candidates:
+        if not str(image.get("alt") or "").startswith("Product photo of "):
+            continue
+        url = str(image.get("src") or "")
+        parsed = urlsplit(url)
+        if (parsed.scheme != "https" or
+                not (parsed.hostname or "").endswith(".fbcdn.net") or
+                not parsed.path):
+            continue
+        if parsed.path in seen:
+            continue
+        seen.add(parsed.path)
+        urls.append(url)
+        if len(urls) >= limit:
+            break
+    return urls
+
+
+def save_gallery(session: requests.Session, urls: list[str], listing_id: str,
+                 run_dir: Path) -> list[str]:
+    """Download up to four validated Facebook CDN photos into the scan folder."""
+    if not listing_id.isdecimal():
+        return []
+    directory = run_dir / "gallery_images"
+    saved = []
+    for index, url in enumerate(urls[:MAX_LISTING_PHOTOS]):
+        try:
+            source = urlsplit(url)
+            if source.scheme != "https" or not (source.hostname or "").endswith(".fbcdn.net"):
+                raise ValueError("Gallery photo source is not Facebook CDN")
+            with session.get(url, timeout=15, stream=True) as response:
+                response.raise_for_status()
+                final_host = urlsplit(response.url).hostname or ""
+                if not final_host.endswith(".fbcdn.net"):
+                    raise ValueError("Gallery photo redirected outside Facebook CDN")
+                media = response.headers.get("Content-Type", "").split(";", 1)[0].lower()
+                if media not in IMAGE_EXTENSIONS:
+                    raise ValueError("Unsupported gallery photo type")
+                content = bytearray()
+                for chunk in response.iter_content(chunk_size=65536):
+                    content.extend(chunk)
+                    if len(content) > MAX_IMAGE_BYTES:
+                        raise ValueError("Gallery photo exceeded 8 MiB")
+                valid = (content.startswith(b"\xff\xd8\xff") if media == "image/jpeg" else
+                         content.startswith(b"\x89PNG\r\n\x1a\n") if media == "image/png" else
+                         content.startswith(b"RIFF") and content[8:12] == b"WEBP")
+                if not valid:
+                    raise ValueError("Invalid gallery photo signature")
+            directory.mkdir(parents=True, exist_ok=True)
+            photo = directory / f"{listing_id}-{index}{IMAGE_EXTENSIONS[media]}"
+            photo.write_bytes(content)
+            saved.append(photo.relative_to(run_dir).as_posix())
+        except (requests.RequestException, OSError, ValueError):
+            continue
+    return saved
+
+
 def fetch_details(driver, listing: dict, timeout_seconds: int = 12) -> dict:
     url = _marketplace_url(listing["url"])
     driver.get(url)
@@ -63,11 +132,16 @@ def fetch_details(driver, listing: dict, timeout_seconds: int = 12) -> dict:
             lambda browser: "Details" in (browser.execute_script(
                 "return document.body ? document.body.innerText : ''") or ""))
     except Exception:
-        return {"description": None, "seller_condition_label": None,
-                "description_status": "details_not_visible"}
+        pass
     time.sleep(0.3)
     body = driver.execute_script("return document.body ? document.body.innerText : ''") or ""
-    return extract_description(body)
+    photos = driver.execute_script("""
+        return [...document.querySelectorAll('img[alt^="Product photo of "]')]
+          .filter(image => image.getClientRects().length > 0 &&
+                           image.naturalWidth >= 200 && image.naturalHeight >= 200)
+          .map(image => ({alt: image.alt, src: image.currentSrc || image.src}));
+    """) or []
+    return {**extract_description(body), "_gallery_urls": gallery_urls(photos)}
 
 
 def enrich_run(input_file: Path, output_file: Path, *, limit: int | None = None,
@@ -95,20 +169,24 @@ def enrich_run(input_file: Path, output_file: Path, *, limit: int | None = None,
         data["descriptions_visible"] = sum(bool(row.get("description"))
                                            for row in selected)
         data["details_at"] = datetime.now(timezone.utc).isoformat()
-        temporary = output_file.with_suffix(output_file.suffix + ".tmp")
-        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                             encoding="utf-8")
-        temporary.replace(output_file)
+        write_json(output_file, data)
 
     driver, cleanup = create_driver(headless=headless)
+    session = requests.Session()
+    session.trust_env = False
+    session.proxies.clear()
     try:
         driver.set_window_size(1920, 1080)
         for index, listing in enumerate(selected, 1):
             prior = previous.get(str(listing.get("listing_id"))) or {}
-            if prior.get("description_status") in {"visible", "no_visible_description"}:
+            if (prior.get("description_status") in {"visible", "no_visible_description"} and
+                    prior.get("image_files") and
+                    all((input_file.parent / path).is_file()
+                        for path in prior["image_files"])):
                 for key in ("description", "seller_condition_label",
                             "description_status", "description_truncated",
-                            "detail_captured_at"):
+                            "detail_captured_at", "image_file", "image_files",
+                            "gallery_status"):
                     if key in prior:
                         listing[key] = prior[key]
                 print(f"{index}/{len(selected)} reused {listing.get('listing_id')}", flush=True)
@@ -120,12 +198,25 @@ def enrich_run(input_file: Path, output_file: Path, *, limit: int | None = None,
                 details = {"description": None, "seller_condition_label": None,
                            "description_status": "error",
                            "detail_error": str(error)[:200]}
+            urls = details.pop("_gallery_urls", [])
+            photos = save_gallery(session, urls, str(listing.get("listing_id") or ""),
+                                  output_file.parent)
+            if photos:
+                listing["image_file"] = photos[0]
+                listing["image_files"] = photos
+                listing["gallery_status"] = "saved"
+            else:
+                listing["image_files"] = ([listing["image_file"]]
+                                          if listing.get("image_file") else [])
+                listing["gallery_status"] = ("card_photo_only" if listing["image_files"]
+                                             else "not_available")
             listing.update(details)
             listing["detail_captured_at"] = datetime.now(timezone.utc).isoformat()
             print(f"{index}/{len(selected)} {listing['description_status']} "
                   f"{listing.get('listing_id')}", flush=True)
             checkpoint()
     finally:
+        session.close()
         cleanup()
     if db_path is not None:
         stored = store_result(data, input_file.parent, db_path)

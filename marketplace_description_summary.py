@@ -11,7 +11,8 @@ import re
 
 import requests
 
-from marketplace_db import DEFAULT_DB, store_result
+from marketplace_atomic import write_json
+from marketplace_db import DEFAULT_DB, get_cached_analysis, store_result
 
 
 OLLAMA_CHAT = "http://127.0.0.1:11434/api/chat"
@@ -159,10 +160,7 @@ def run(input_file: Path, output_file: Path, model: str, limit: int,
             {"summarized", "no_useful_details", "no_description", "not_applicable"}
             for row in selected)
         data["description_summaries_at"] = datetime.now(timezone.utc).isoformat()
-        temporary = output_file.with_suffix(output_file.suffix + ".tmp")
-        temporary.write_text(json.dumps(data, indent=2, ensure_ascii=False),
-                             encoding="utf-8")
-        temporary.replace(output_file)
+        write_json(output_file, data)
 
     try:
         for index, listing in enumerate(selected, 1):
@@ -174,9 +172,19 @@ def run(input_file: Path, output_file: Path, model: str, limit: int,
                                                     sort_keys=True).encode("utf-8")).hexdigest()
             prior = previous.get(str(listing.get("listing_id"))) or {}
             metadata = prior.get("description_summary") or {}
+            reuse_source = "checkpoint"
+            if (metadata.get("input_hash") != input_hash and db_path is not None
+                    and listing.get("listing_id")):
+                cached = get_cached_analysis(
+                    db_path, "facebook_marketplace", str(listing["listing_id"]))
+                prior = cached
+                metadata = cached.get("description_summary") or {}
+                reuse_source = "database"
             listing_kind = ((listing.get("vision") or {}).get("observations") or {}).get(
                 "listing_kind")
             if (metadata.get("input_hash") == input_hash and
+                    metadata.get("model") == model and
+                    metadata.get("prompt") == PROMPT_VERSION and
                     metadata.get("status") in
                     {"summarized", "no_useful_details", "no_description", "not_applicable"} and
                     listing_kind == "product"):
@@ -187,7 +195,8 @@ def run(input_file: Path, output_file: Path, model: str, limit: int,
                     listing["description_summary"]["status"] = (
                         "summarized" if listing["refactored_description"] else
                         "no_useful_details")
-                print(f"{index}/{len(selected)} reused {listing.get('listing_id')}", flush=True)
+                print(f"{index}/{len(selected)} {reuse_source} cached "
+                      f"{listing.get('listing_id')}", flush=True)
                 checkpoint()
                 continue
             if not description:

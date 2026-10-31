@@ -10,7 +10,8 @@ from unittest.mock import patch
 
 from marketplace_condition import PROMPT_VERSION as CONDITION_PROMPT, run as run_condition
 from marketplace_db import get_cached_analysis, store_result
-from marketplace_vision import PROMPT_VERSION as VISION_PROMPT, run as run_vision
+from marketplace_description_summary import run as run_summary
+from marketplace_vision import LEGACY_CACHED_PROMPT, run as run_vision
 
 
 PNG = base64.b64decode(
@@ -26,6 +27,42 @@ def input_hash(photo: bytes, fields: dict) -> str:
 
 
 class MarketplaceAnalysisCacheTests(unittest.TestCase):
+    def test_description_summary_reuses_database_result_across_scans(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            db = root / "marketplace.sqlite"
+            source = root / "scan-one.json"
+            listing = {
+                "listing_id": "desk-1", "title": "Wood desk",
+                "description": "Solid wood desk with scratches.",
+                "vision": {"observations": {"listing_kind": "product"}},
+            }
+            source.write_text(json.dumps({"listings": [listing]}), encoding="utf-8")
+            with patch("marketplace_description_summary.summarize_description",
+                       return_value="Solid wood desk with scratches.") as model:
+                run_summary(source, root / "summary-one.json", "qwen3:8b", 1,
+                            10, db_path=db)
+            model.assert_called_once()
+            self.assertEqual(get_cached_analysis(db, "facebook_marketplace", "desk-1")
+                             ["description_summary"]["status"], "summarized")
+
+            second = root / "scan-two.json"
+            second.write_text(json.dumps({"listings": [listing]}), encoding="utf-8")
+            with patch("marketplace_description_summary.summarize_description",
+                       side_effect=AssertionError("unchanged listing was reprocessed")):
+                result = run_summary(second, root / "summary-two.json", "qwen3:8b",
+                                     1, 10, db_path=db)
+            self.assertEqual(result["listings"][0]["refactored_description"],
+                             "Solid wood desk with scratches.")
+
+            changed = {**listing, "description": "Solid wood desk, like new."}
+            second.write_text(json.dumps({"listings": [changed]}), encoding="utf-8")
+            with patch("marketplace_description_summary.summarize_description",
+                       return_value="Solid wood desk, like new.") as model:
+                run_summary(second, root / "summary-changed.json", "qwen3:8b",
+                            1, 10, db_path=db)
+            model.assert_called_once()
+
     def test_out_of_range_listing_skips_model_and_preserves_saved_analysis(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -85,7 +122,7 @@ class MarketplaceAnalysisCacheTests(unittest.TestCase):
             }
             listing["vision"] = {
                 "status": "observed", "model": MODEL,
-                "prompt_version": VISION_PROMPT,
+                "prompt_version": LEGACY_CACHED_PROMPT,
                 "input_hash": input_hash(PNG, {
                     "title": listing["title"], "description": listing["description"]}),
                 "observations": observations,

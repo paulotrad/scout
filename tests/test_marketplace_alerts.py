@@ -4,17 +4,152 @@ from pathlib import Path
 from datetime import datetime, timezone
 import tempfile
 import unittest
+import sqlite3
+from contextlib import closing
 
 from marketplace_alerts import (
-    claim_slot, create_search, delete_search, due_slot, finish_slot,
-    get_account, get_demo_account, grant_admin, is_admin_email, item_matches,
+    claim_slot, create_search, delete_search, due_fast_slot, due_slot, finish_slot,
+    get_account, get_demo_account, grant_admin, hide_all_inbox_alerts,
+    is_admin_email, item_matches,
     list_account_profiles, list_admin_emails, list_alerts, list_searches,
-    mark_read, next_scheduled_at, open_account, pending_slots, record_scan_matches, release_slot,
-    revoke_admin, save_account, save_demo_account, validate_search,
+    mark_read, next_fast_at, next_scheduled_at, open_account, pending_slots,
+    record_scan_matches, release_slot, remove_nonproduct_alerts,
+    revoke_admin, save_account, save_demo_account, set_alert_triage,
+    validate_search,
 )
 
 
 class MarketplaceAlertTests(unittest.TestCase):
+    def test_service_guard_rejects_product_model_label_and_cleans_old_alert(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "alerts.sqlite"
+            search = create_search({"zip_code": "21009", "radius_miles": 15,
+                                    "scan_keywords": ["shed"],
+                                    "item_terms": ["shed"],
+                                    "minimum_grade": "any"}, db_path)
+            scan = {"id": "scan-sheds", "status": "complete", "zip_code": "21009",
+                    "radius_miles": 15}
+            service = {"id": "1", "title": "Need shed built?",
+                       "description": "Shed building", "item_type": "shed",
+                       "listing_kind": "product", "distance_miles_approx": 3,
+                       "asking_price": 100}
+            self.assertFalse(item_matches(search, scan, service))
+            genuine = {**service, "id": "2", "title": "Used shed for sale",
+                       "description": "Asking $400. Delivery available.",
+                       "asking_price": 400}
+            self.assertTrue(item_matches(search, scan, genuine))
+            titled_price = {**genuine, "asking_price": 25,
+                            "price_source": "seller_title",
+                            "review_flags": ["zero_price_card_may_not_be_free"]}
+            self.assertTrue(item_matches(search, scan, titled_price))
+            with closing(sqlite3.connect(db_path)) as db, db:
+                db.execute("CREATE TABLE listings (source TEXT, listing_id TEXT, "
+                           "title TEXT, description TEXT)")
+                db.execute("INSERT INTO listings VALUES (?,?,?,?)",
+                           ("facebook_marketplace", "1", service["title"],
+                            service["description"]))
+                db.execute("INSERT INTO match_alerts "
+                           "(search_id, scan_id, listing_id, title, item_type, "
+                           "condition_grade, matched_at) VALUES (?,?,?,?,?,?,?)",
+                           (search["id"], scan["id"], "1", service["title"],
+                            "shed", "unknown", datetime.now(timezone.utc).isoformat()))
+            self.assertEqual(remove_nonproduct_alerts(db_path), 1)
+            self.assertEqual(list_alerts(db_path, search_id=search["id"])["alerts"], [])
+
+    def test_hide_all_moves_only_current_inbox_and_future_matches_stay_visible(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            settings = {"zip_code": "21009", "radius_miles": 15,
+                        "scan_keywords": ["chair"], "item_terms": ["chair"],
+                        "minimum_grade": "any"}
+            first = create_search(settings, db)
+            second = create_search(settings, db)
+            def scan(scan_id, listing_id):
+                return {"id": scan_id, "status": "complete", "zip_code": "21009",
+                        "radius_miles": 15, "listings": [
+                            {"id": listing_id, "title": "Wood chair",
+                             "item_type": "chair", "listing_kind": "product",
+                             "distance_miles_approx": 4, "asking_price": 20}]}
+            record_scan_matches(scan("scan-one", "chair-one"), db)
+            record_scan_matches(scan("scan-two", "chair-two"), db)
+            first_alerts = list_alerts(db, search_id=first["id"])["alerts"]
+            self.assertTrue(set_alert_triage(first_alerts[0]["id"], "saved", db,
+                                             search_id=first["id"]))
+            self.assertEqual(hide_all_inbox_alerts(first["id"], db), 1)
+            self.assertEqual(hide_all_inbox_alerts(first["id"], db), 0)
+            first_counts = list_alerts(db, search_id=first["id"])["triage_counts"]
+            self.assertEqual(first_counts, {"inbox": 0, "saved": 1, "hidden": 1})
+            self.assertEqual(list_alerts(db, search_id=first["id"])["unread_count"], 0)
+            self.assertEqual(list_alerts(db, search_id=second["id"])
+                             ["triage_counts"]["inbox"], 2)
+            hidden = list_alerts(db, search_id=first["id"],
+                                 triage_status="hidden")["alerts"][0]
+            self.assertTrue(set_alert_triage(hidden["id"], "inbox", db,
+                                             search_id=first["id"]))
+            self.assertEqual(list_alerts(db, search_id=first["id"])
+                             ["triage_counts"]["inbox"], 1)
+            hide_all_inbox_alerts(first["id"], db)
+            record_scan_matches(scan("scan-three", "chair-three"), db)
+            self.assertEqual(list_alerts(db, search_id=first["id"])
+                             ["triage_counts"]["inbox"], 1)
+
+    def test_alert_pages_keep_older_matches_reachable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            search = create_search({"zip_code": "21009", "radius_miles": 15,
+                                    "scan_keywords": ["free"],
+                                    "item_terms": ["free"],
+                                    "minimum_grade": "any"}, db)
+            self.assertEqual(record_scan_matches({
+                "id": "scan-pages", "status": "complete", "zip_code": "21009",
+                "radius_miles": 15,
+                "listings": [{"id": str(number), "title": f"Chair {number}",
+                              "item_type": "chair", "listing_kind": "product",
+                              "distance_miles_approx": 3, "asking_price": 0}
+                             for number in range(3)]}, db), 3)
+            first_page = list_alerts(db, limit=2, search_id=search["id"])
+            second_page = list_alerts(db, limit=2, offset=2,
+                                      search_id=search["id"])
+            self.assertEqual(first_page["triage_counts"]["inbox"], 3)
+            self.assertEqual(len(first_page["alerts"]), 2)
+            self.assertEqual(len(second_page["alerts"]), 1)
+            self.assertFalse({row["id"] for row in first_page["alerts"]} &
+                             {row["id"] for row in second_page["alerts"]})
+            with self.assertRaises(ValueError):
+                list_alerts(db, offset=-1)
+
+    def test_alert_triage_is_saved_and_owned_by_the_search(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            settings = {"zip_code": "21009", "radius_miles": 15,
+                        "scan_keywords": ["chair"], "item_terms": ["chair"],
+                        "minimum_grade": "any"}
+            first = create_search(settings, db)
+            other = create_search(settings, db)
+            scan = {"id": "scan-triage", "status": "complete",
+                    "zip_code": "21009", "radius_miles": 15,
+                    "listings": [{"id": "chair", "title": "Wood chair",
+                                  "item_type": "chair", "listing_kind": "product",
+                                  "distance_miles_approx": 4,
+                                  "asking_price": 20}]}
+            self.assertEqual(record_scan_matches(scan, db), 2)
+            first_alert = list_alerts(db, search_id=first["id"])["alerts"][0]
+            self.assertFalse(set_alert_triage(first_alert["id"], "saved", db,
+                                              search_id=other["id"]))
+            self.assertTrue(set_alert_triage(first_alert["id"], "saved", db,
+                                             search_id=first["id"]))
+            inbox = list_alerts(db, search_id=first["id"])
+            saved = list_alerts(db, search_id=first["id"], triage_status="saved")
+            self.assertEqual(inbox["alerts"], [])
+            self.assertEqual(inbox["unread_count"], 0)
+            self.assertEqual(saved["alerts"][0]["triage_status"], "saved")
+            self.assertIsNotNone(saved["alerts"][0]["read_at"])
+            self.assertEqual(saved["triage_counts"]["saved"], 1)
+            self.assertEqual(list_alerts(db, search_id=other["id"])["triage_counts"]["saved"], 0)
+            with self.assertRaises(ValueError):
+                set_alert_triage(first_alert["id"], "deleted", db,
+                                 search_id=first["id"])
+
     def test_admin_roles_are_persisted_and_case_insensitive(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "alerts.sqlite"
@@ -58,6 +193,16 @@ class MarketplaceAlertTests(unittest.TestCase):
                          "distance_miles_approx": 16}))
         self.assertFalse(item_matches(search, {**scan, "zip_code": "21010"}, item))
         self.assertFalse(item_matches(search, {**scan, "radius_miles": 10}, item))
+
+    def test_pet_listing_matches_without_a_condition_grade(self):
+        search = {"zip_code": "21009", "radius_miles": 15,
+                  "item_terms": ["dog"], "minimum_grade": "good"}
+        scan = {"zip_code": "21009", "radius_miles": 15}
+        item = {"listing_kind": "product", "pet_listing": True,
+                "title": "Dog to Good Home", "item_type": "dog",
+                "condition_grade": "", "distance_miles_approx": 4,
+                "asking_price": 0}
+        self.assertTrue(item_matches(search, scan, item))
 
     def test_alerts_are_deduplicated_across_scans_and_marked_read(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -180,6 +325,29 @@ class MarketplaceAlertTests(unittest.TestCase):
             self.assertEqual(second["terms"], ["free"])
             self.assertEqual(len(list_account_profiles(db)), 2)
 
+    def test_saving_new_keywords_removes_only_obsolete_waiting_jobs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            scooter = {"term": "electric scooter", "zip_code": "21009",
+                       "radius_miles": 30, "min_price": 0, "max_price": 30,
+                       "fast": False}
+            shed = {**scooter, "term": "shed", "max_price": 100}
+            account = save_account({"email": "buyer@example.com", "plan": "plus_preview",
+                                    "timezone": "America/New_York",
+                                    "zip_code": "21009", "radius_miles": 30,
+                                    "terms": ["electric scooter", "shed"],
+                                    "watch_items": [scooter, shed]}, db)
+            self.assertTrue(claim_slot("retry:scooter:item:old", db,
+                                       account_id=account["id"], watch_item=scooter,
+                                       scan_mode="scheduled"))
+            self.assertTrue(claim_slot("today:item:shed", db,
+                                       account_id=account["id"], watch_item=shed,
+                                       scan_mode="scheduled"))
+            save_account({**account, "terms": ["shed"],
+                          "watch_items": [shed]}, db)
+            self.assertEqual([row["slot_key"] for row in pending_slots(db)],
+                             ["today:item:shed"])
+
     def test_email_notification_setting_is_per_profile_and_survives_other_edits(self):
         with tempfile.TemporaryDirectory() as directory:
             db = Path(directory) / "alerts.sqlite"
@@ -241,13 +409,20 @@ class MarketplaceAlertTests(unittest.TestCase):
             db = Path(directory) / "alerts.sqlite"
             item = {"term": "desk", "zip_code": "10001", "radius_miles": 5,
                     "min_price": 20, "max_price": 80}
-            self.assertTrue(claim_slot("2026-10-23-07:item:desk", db, "account", item))
+            self.assertTrue(claim_slot("2026-10-23-07:item:desk", db, "account", item,
+                                       not_before="2026-10-23T11:05:00+00:00",
+                                       scan_mode="incremental", retry_root="scan-old",
+                                       retry_attempt=1))
             slots = pending_slots(db)
             self.assertEqual(len(slots), 1)
             self.assertEqual(slots[0]["account_id"], "account")
             self.assertEqual(slots[0]["slot_key"], "2026-10-23-07:item:desk")
             self.assertEqual(slots[0]["watch_item"], item)
             self.assertTrue(slots[0]["claimed_at"])
+            self.assertEqual(slots[0]["not_before"], "2026-10-23T11:05:00+00:00")
+            self.assertEqual(slots[0]["scan_mode"], "incremental")
+            self.assertEqual(slots[0]["retry_root"], "scan-old")
+            self.assertEqual(slots[0]["retry_attempt"], 1)
 
     def test_owned_scan_alerts_only_its_email_profile(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -268,9 +443,9 @@ class MarketplaceAlertTests(unittest.TestCase):
             self.assertEqual(list_alerts(db, search_id=second["search_id"])["alerts"], [])
             self.assertEqual(len(list_alerts(db, search_id=first["search_id"],
                                              scan_ids={"scan-owned"})["alerts"]), 1)
-            self.assertEqual(list_alerts(db, search_id=first["search_id"],
-                                         scan_ids=set()),
-                             {"unread_count": 0, "alerts": []})
+            empty = list_alerts(db, search_id=first["search_id"], scan_ids=set())
+            self.assertEqual(empty["unread_count"], 0)
+            self.assertEqual(empty["alerts"], [])
 
     def test_same_schedule_slot_is_claimed_per_account(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -293,6 +468,11 @@ class MarketplaceAlertTests(unittest.TestCase):
         self.assertEqual(due_slot(account, datetime(2026, 10, 23, 11, 1,
                                                   tzinfo=timezone.utc)),
                          "2026-10-23-07")
+        self.assertEqual(due_slot(account, datetime(2026, 10, 23, 12, 30,
+                                                  tzinfo=timezone.utc)),
+                         "2026-10-23-07")
+        self.assertIsNone(due_slot(account, datetime(2026, 10, 23, 13, 1,
+                                                  tzinfo=timezone.utc)))
         self.assertEqual(due_slot(account, datetime(2026, 10, 23, 16, 1,
                                                   tzinfo=timezone.utc)),
                          "2026-10-23-12")
@@ -307,6 +487,40 @@ class MarketplaceAlertTests(unittest.TestCase):
             finish_slot("2026-10-23-07", "scan-test", db)
             release_slot("2026-10-23-07", db)
             self.assertFalse(claim_slot("2026-10-23-07", db))
+
+    def test_plus_priority_keyword_gets_bounded_half_hour_checks(self):
+        watch = [{"term": "mower", "zip_code": "21009", "radius_miles": 15,
+                  "min_price": 0, "max_price": 100, "fast": True},
+                 {"term": "chair", "zip_code": "21009", "radius_miles": 15,
+                  "min_price": 0, "max_price": 100, "fast": False}]
+        with tempfile.TemporaryDirectory() as directory:
+            db = Path(directory) / "alerts.sqlite"
+            account = save_account({"email": "buyer@example.com", "zip_code": "21009",
+                                    "radius_miles": 15, "terms": ["mower", "chair"],
+                                    "plan": "plus_preview", "timezone": "America/New_York",
+                                    "watch_items": watch}, db)
+            self.assertTrue(account["watch_items"][0]["fast"])
+            self.assertEqual(next_fast_at(account, datetime(
+                2026, 10, 23, 13, 40, tzinfo=timezone.utc)).hour, 10)
+            self.assertEqual(next_fast_at(account, datetime(
+                2026, 10, 23, 13, 40, tzinfo=timezone.utc)).minute, 0)
+            self.assertEqual(next_fast_at(account, datetime(
+                2026, 10, 23, 10, 45, tzinfo=timezone.utc)).hour, 8)
+            self.assertEqual(due_fast_slot(account, datetime(
+                2026, 10, 23, 14, 30, tzinfo=timezone.utc)),
+                "fast-2026-10-23-10-30")
+            self.assertEqual(due_fast_slot(account, datetime(
+                2026, 10, 23, 14, 6, tzinfo=timezone.utc)),
+                "fast-2026-10-23-10-00")
+            self.assertIsNone(due_fast_slot(account, datetime(
+                2026, 10, 23, 14, 25, tzinfo=timezone.utc)))
+            self.assertIsNone(due_fast_slot(account, datetime(
+                2026, 10, 23, 11, 30, tzinfo=timezone.utc)))
+            with self.assertRaises(ValueError):
+                save_account({**account, "plan": "free"}, db)
+            with self.assertRaises(ValueError):
+                save_account({**account, "watch_items": [
+                    watch[0], {**watch[1], "fast": True}]}, db)
 
 
 if __name__ == "__main__":

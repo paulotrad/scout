@@ -19,9 +19,16 @@ import requests
 
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
-ATTRIBUTION = "Location coordinates: © OpenStreetMap contributors (Nominatim)"
+NOMINATIM_REVERSE = "https://nominatim.openstreetmap.org/reverse"
+ZIP_LOOKUP = "https://api.zippopotam.us/us/"
+ATTRIBUTION = ("ZIP centers and postal towns: GeoNames via Zippopotam.us "
+               "when available; seller towns: © OpenStreetMap contributors "
+               "(Nominatim)")
 USER_AGENT = "MarketplaceResearcher/0.1 (single-user local Marketplace project)"
-STATES = {"MD": "Maryland", "PA": "Pennsylvania", "DE": "Delaware"}
+STATES = dict(zip(
+    "AL AK AZ AR CA CO CT DE FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC".split(),
+    "Alabama|Alaska|Arizona|Arkansas|California|Colorado|Connecticut|Delaware|Florida|Georgia|Hawaii|Idaho|Illinois|Indiana|Iowa|Kansas|Kentucky|Louisiana|Maine|Maryland|Massachusetts|Michigan|Minnesota|Mississippi|Missouri|Montana|Nebraska|Nevada|New Hampshire|New Jersey|New Mexico|New York|North Carolina|North Dakota|Ohio|Oklahoma|Oregon|Pennsylvania|Rhode Island|South Carolina|South Dakota|Tennessee|Texas|Utah|Vermont|Virginia|Washington|West Virginia|Wisconsin|Wyoming|District of Columbia".split("|")
+))
 
 
 def distance_miles(first: tuple[float, float], second: tuple[float, float]) -> float:
@@ -34,7 +41,7 @@ def distance_miles(first: tuple[float, float], second: tuple[float, float]) -> f
 
 
 class TownGeocoder:
-    """A single-threaded, cached Nominatim client for this small local run."""
+    """Cached ZIP and seller-town lookup for a small local run."""
 
     def __init__(self, cache_file: Path):
         self.cache_file = cache_file
@@ -49,7 +56,56 @@ class TownGeocoder:
     def close(self) -> None:
         self.session.close()
 
+    def zip_info(self, zip_code: str) -> dict | None:
+        """Get the ZIP's postal town and center before falling back to OSM.
+
+        A generic OSM postal-code result can name a nearby large city instead
+        of the actual postal town, causing Marketplace to scan the wrong area.
+        """
+        if not re.fullmatch(r"\d{5}", zip_code):
+            return None
+        cache_key = f"zip-info:{zip_code}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+        try:
+            response = self.session.get(ZIP_LOOKUP + zip_code, timeout=15)
+            response.raise_for_status()
+            payload = response.json()
+        except (requests.RequestException, ValueError):
+            return None
+        info = None
+        if (isinstance(payload, dict) and
+                payload.get("post code") == zip_code and
+                payload.get("country abbreviation") == "US"):
+            for place in payload.get("places") or []:
+                try:
+                    state = place["state abbreviation"]
+                    locality = place["place name"].strip()
+                    latitude = float(place["latitude"])
+                    longitude = float(place["longitude"])
+                    if (state in STATES and locality and
+                            -90 <= latitude <= 90 and -180 <= longitude <= 180):
+                        info = {"locality": locality, "state": state,
+                                "latitude": latitude, "longitude": longitude}
+                        break
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    continue
+        self.cache[cache_key] = info
+        self._save()
+        return info
+
     def lookup(self, place: str) -> dict | None:
+        if re.fullmatch(r"\d{5}", place):
+            info = self.zip_info(place)
+            if info:
+                chosen = {"latitude": info["latitude"],
+                          "longitude": info["longitude"],
+                          "display_name": (f"{place}, {info['locality']}, "
+                                           f"{STATES[info['state']]}, United States")}
+                if self.cache.get(place) != chosen:
+                    self.cache[place] = chosen
+                    self._save()
+                return chosen
         if place in self.cache:
             return self.cache[place]
         if re.fullmatch(r"\d{5}", place):
@@ -87,6 +143,41 @@ class TownGeocoder:
         self.cache[place] = chosen
         self._save()
         return chosen
+
+    def locality_for_zip(self, zip_code: str, location: dict, state: str) -> str | None:
+        """Resolve a ZIP centroid to a nearby named place for site pickers.
+
+        Postal-code search results often contain only county and state, while
+        Marketplace's picker offers a town name. Cache the reverse result and
+        require the same ZIP and state before using that town as a search query.
+        """
+        cache_key = f"zip-locality:{zip_code}"
+        if isinstance(self.cache.get(cache_key), str) and self.cache[cache_key]:
+            return self.cache[cache_key]
+        if not re.fullmatch(r"\d{5}", zip_code) or state not in STATES:
+            return None
+        remaining = 1.1 - (time.monotonic() - self.last_request)
+        if remaining > 0:
+            time.sleep(remaining)
+        response = self.session.get(NOMINATIM_REVERSE, params={
+            "lat": location["latitude"], "lon": location["longitude"],
+            "format": "jsonv2", "addressdetails": 1, "zoom": 14,
+        }, timeout=20)
+        self.last_request = time.monotonic()
+        response.raise_for_status()
+        address = response.json().get("address") or {}
+        locality = None
+        if (address.get("country_code") == "us" and
+                address.get("state") == STATES[state] and
+                address.get("postcode") == zip_code):
+            locality = next((address[field].strip() for field in
+                             ("city", "town", "village", "hamlet", "suburb",
+                              "municipality")
+                             if isinstance(address.get(field), str) and
+                             address[field].strip()), None)
+        self.cache[cache_key] = locality
+        self._save()
+        return locality
 
     def _save(self) -> None:
         self.cache_file.parent.mkdir(parents=True, exist_ok=True)

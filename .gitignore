@@ -4,5 +4,6 @@ __pycache__/
 runs/
 .env
 .codex-attachments/
+.codex-remote-attachments/
 vendor/
 marketplace_settings.json

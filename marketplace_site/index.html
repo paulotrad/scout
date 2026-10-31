@@ -6,8 +6,9 @@
   <meta name="theme-color" content="#122139">
   <meta name="description" content="Run local Marketplace scans and review AI item and condition estimates.">
   <title>Scout — Marketplace scans</title>
-  <link rel="stylesheet" href="__BASE_PATH__/styles.css?v=20261026-7">
-  <script src="__BASE_PATH__/app.js?v=20261026-7" defer></script>
+  <link rel="stylesheet" href="__BASE_PATH__/styles.css?v=__CSS_VERSION__">
+  <script src="__BASE_PATH__/trip_math.js?v=__TRIP_VERSION__" defer></script>
+  <script src="__BASE_PATH__/app.js?v=__JS_VERSION__" defer></script>
 </head>
 <body data-public-writes="__PUBLIC_WRITES__">
   <header class="site-header">
@@ -23,6 +24,9 @@
         </select>
         <a class="header-alert-link" id="alert-link" href="__BASE_PATH__/#alerts-title">Alerts <span id="alert-count" aria-label="Unread alerts">0</span></a>
         <a class="header-link" href="__BASE_PATH__/setup">Plan setup <span aria-hidden="true">↗</span></a>
+        <a class="header-link" href="__BASE_PATH__/health">Scan health</a>
+        <a class="header-link comps-link" href="__BASE_PATH__/comparables/couches">Couch prices</a>
+        <a class="header-link general-comps-link" href="__BASE_PATH__/comparables/general">Price samples</a>
         <a class="header-link admin-link" href="__BASE_PATH__/admin">Admin</a>
       </div>
     </div>

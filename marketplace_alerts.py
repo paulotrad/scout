@@ -15,10 +15,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from marketplace_db import DEFAULT_DB
 from marketplace_scan_runner import ROOT, validate_settings
+from marketplace_vision import seller_offer_override
 
 
 ALERT_DB = ROOT / DEFAULT_DB
-GRADES = {"needs_repair": 1, "fair": 2, "good": 3, "like_new": 4, "new": 5}
+GRADES = {"needs_repair": 1, "poor": 1, "fair": 2, "good": 3, "like_new": 4, "new": 5}
 QUERY_TERM = re.compile(r"^[^\x00-\x1f]{1,80}$")
 EMAIL = re.compile(r"^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,63}$", re.I)
 DEMO_ACCOUNT = "demo"
@@ -49,6 +50,8 @@ CREATE TABLE IF NOT EXISTS match_alerts (
     condition_grade TEXT NOT NULL,
     matched_at TEXT NOT NULL,
     read_at TEXT,
+    triage_status TEXT NOT NULL DEFAULT 'inbox'
+        CHECK(triage_status IN ('inbox', 'saved', 'hidden')),
     UNIQUE(search_id, listing_id)
 );
 CREATE INDEX IF NOT EXISTS idx_match_alerts_recent
@@ -93,6 +96,8 @@ CREATE TABLE IF NOT EXISTS email_outbox (
     recipient TEXT NOT NULL,
     subject TEXT NOT NULL,
     body_text TEXT NOT NULL,
+    body_html TEXT,
+    image_ids_json TEXT,
     created_at TEXT NOT NULL,
     next_attempt_at TEXT NOT NULL,
     attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -105,6 +110,11 @@ CREATE TABLE IF NOT EXISTS scheduled_slots (
     slot_key TEXT NOT NULL,
     scan_id TEXT,
     claimed_at TEXT NOT NULL,
+    watch_item_json TEXT,
+    not_before TEXT,
+    scan_mode TEXT,
+    retry_root TEXT,
+    retry_attempt INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (account_id, slot_key)
 );
 """
@@ -125,15 +135,27 @@ def _connect(db_path: Path = ALERT_DB) -> sqlite3.Connection:
                             ("global_locks_json", "'{}'")):
         if column not in columns:
             db.execute(f"ALTER TABLE saved_searches ADD COLUMN {column} TEXT NOT NULL DEFAULT {default}")
+    alert_columns = {row[1] for row in db.execute("PRAGMA table_info(match_alerts)")}
+    if "triage_status" not in alert_columns:
+        db.execute("ALTER TABLE match_alerts ADD COLUMN triage_status TEXT NOT NULL "
+                   "DEFAULT 'inbox' CHECK(triage_status IN ('inbox', 'saved', 'hidden'))")
     slot_columns = {row[1] for row in db.execute("PRAGMA table_info(scheduled_slots)")}
-    if "watch_item_json" not in slot_columns:
-        db.execute("ALTER TABLE scheduled_slots ADD COLUMN watch_item_json TEXT")
+    for column, definition in (
+            ("watch_item_json", "TEXT"), ("not_before", "TEXT"),
+            ("scan_mode", "TEXT"), ("retry_root", "TEXT"),
+            ("retry_attempt", "INTEGER NOT NULL DEFAULT 0")):
+        if column not in slot_columns:
+            db.execute(f"ALTER TABLE scheduled_slots ADD COLUMN {column} {definition}")
     profile_columns = {row[1] for row in db.execute("PRAGMA table_info(account_profiles)")}
     if "email" not in profile_columns:
         db.execute("ALTER TABLE account_profiles ADD COLUMN email TEXT")
     if "email_notifications_enabled" not in profile_columns:
         db.execute("ALTER TABLE account_profiles ADD COLUMN email_notifications_enabled "
                    "INTEGER NOT NULL DEFAULT 1 CHECK(email_notifications_enabled IN (0, 1))")
+    outbox_columns = {row[1] for row in db.execute("PRAGMA table_info(email_outbox)")}
+    for column in ("body_html", "image_ids_json"):
+        if column not in outbox_columns:
+            db.execute(f"ALTER TABLE email_outbox ADD COLUMN {column} TEXT")
     db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_account_profiles_email "
                "ON account_profiles(email COLLATE NOCASE)")
     db.commit()
@@ -182,7 +204,7 @@ def _legacy_watch_items(search: dict) -> list[dict]:
               "radius_miles": search["radius_miles"],
               "min_price": search.get("min_price", 0),
               "max_price": search.get("max_price", MAX_PRICE)}
-    return [{"term": term, **values} for term in
+    return [{"term": term, **values, "fast": False} for term in
             (search.get("item_terms") or search.get("scan_keywords") or [])]
 
 
@@ -212,7 +234,11 @@ def _validated_watch_items(payload: dict, search: dict) -> tuple[list[dict], dic
                     for key in LOCK_FIELDS}
         validated = validate_search({**resolved, "scan_keywords": [term],
                                      "item_terms": [term]})
-        items.append({"term": term, **{key: validated[key] for key in LOCK_FIELDS}})
+        fast = entry.get("fast", False)
+        if type(fast) is not bool:
+            raise ValueError("Choose whether this keyword gets fast checks")
+        items.append({"term": term, **{key: validated[key] for key in LOCK_FIELDS},
+                      "fast": fast})
     return items, locks
 
 
@@ -268,7 +294,9 @@ def delete_search(search_id: int, db_path: Path = ALERT_DB) -> bool:
 
 def item_matches(search: dict, scan: dict, item: dict) -> bool:
     """Match only reviewed physical items in the search's measured area."""
-    if item.get("listing_kind") != "product":
+    if (item.get("listing_kind") != "product" or
+            seller_offer_override(item.get("title") or "",
+                                  item.get("description") or "")):
         return False
     distance = item.get("distance_miles_approx")
     if (isinstance(distance, bool) or not isinstance(distance, (int, float)) or
@@ -278,11 +306,12 @@ def item_matches(search: dict, scan: dict, item: dict) -> bool:
     if (isinstance(price, bool) or not isinstance(price, (int, float)) or
             not math.isfinite(price) or
             ("zero_price_card_may_not_be_free" in (item.get("review_flags") or []) and
-             item.get("price_source") != "seller_description")):
+             item.get("price_source") not in {"seller_description", "seller_title"})):
         return False
     grade = item.get("condition_grade") or "unknown"
     minimum = search["minimum_grade"]
-    if minimum != "any" and GRADES.get(grade, 0) < GRADES[minimum]:
+    if (minimum != "any" and not item.get("pet_listing") and
+            GRADES.get(grade, 0) < GRADES[minimum]):
         return False
     haystack = " ".join(str(item.get(key) or "") for key in (
         "title", "item_type", "category", "identity", "description",
@@ -298,6 +327,25 @@ def item_matches(search: dict, scan: dict, item: dict) -> bool:
         (price == 0 if config["term"].casefold() == "free"
          else config["term"].casefold() in haystack)
         for config in watch_items)
+
+
+def remove_nonproduct_alerts(db_path: Path = ALERT_DB) -> int:
+    """Remove derived alerts for offers clearly selling work or financing."""
+    with closing(_connect(db_path)) as db, db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' "
+                          "AND name = 'listings'").fetchone():
+            return 0
+        rows = db.execute("""
+            SELECT a.id, l.title, l.description
+            FROM match_alerts a JOIN listings l
+              ON l.source = 'facebook_marketplace'
+             AND l.listing_id = a.listing_id
+        """).fetchall()
+        bad_ids = [row["id"] for row in rows if seller_offer_override(
+            row["title"], row["description"])]
+        db.executemany("DELETE FROM match_alerts WHERE id = ?",
+                       ((item_id,) for item_id in bad_ids))
+        return len(bad_ids)
 
 
 def validate_account(payload: dict) -> dict:
@@ -329,6 +377,10 @@ def validate_account(payload: dict) -> dict:
     except ZoneInfoNotFoundError as error:
         raise ValueError("This timezone is unavailable on this computer") from error
     watch_items, locks = _validated_watch_items(payload, search)
+    if sum(item["fast"] for item in watch_items) > 1:
+        raise ValueError("Choose one priority keyword for fast checks")
+    if plan != "plus_preview" and any(item["fast"] for item in watch_items):
+        raise ValueError("Fast checks are available in Plus preview")
     if [item["term"].casefold() for item in watch_items] != [
             term.casefold() for term in search["scan_keywords"]]:
         raise ValueError("Watchlist keywords must match the saved terms")
@@ -382,7 +434,8 @@ def _default_account(email: str | None = None) -> dict:
             "minimum_grade": "any", "min_price": 0, "max_price": 1000,
             "plan": "free", "timezone": "America/New_York",
             "email_notifications_enabled": True,
-            "next_run_at": None, "account_schema_version": 3}
+            "next_run_at": None, "next_fast_run_at": None,
+            "account_schema_version": 3}
     account["watch_items"] = _legacy_watch_items({**account, "scan_keywords": account["terms"]})
     account["global_locks"] = {key: True for key in LOCK_FIELDS}
     return account
@@ -404,6 +457,8 @@ def _account_from_row(row: sqlite3.Row) -> dict:
                "configured_at": row["configured_at"],
                "account_schema_version": 3}
     account["next_run_at"] = next_scheduled_at(account).isoformat()
+    next_fast = next_fast_at(account)
+    account["next_fast_run_at"] = next_fast.isoformat() if next_fast else None
     return account
 
 
@@ -450,6 +505,31 @@ def open_account(email: str, db_path: Path = ALERT_DB,
                         allow_legacy_claim=allow_legacy_claim)
 
 
+def _prune_obsolete_pending_slots(db: sqlite3.Connection, account_id: str,
+                                  profile: dict) -> None:
+    """Drop waiting jobs for keywords removed from the saved plan."""
+    current = {item["term"].casefold(): item
+               for item in profile.get("watch_items") or []}
+    rows = db.execute("""
+        SELECT slot_key, watch_item_json, scan_mode FROM scheduled_slots
+        WHERE account_id = ? AND scan_id IS NULL AND watch_item_json IS NOT NULL
+    """, (account_id,)).fetchall()
+    for row in rows:
+        if row["scan_mode"] == "coverage_pilot":
+            continue
+        try:
+            saved = json.loads(row["watch_item_json"])
+            item = current.get(str(saved.get("term") or "").casefold())
+        except (TypeError, ValueError, AttributeError):
+            item = None
+        if (item is None or
+                (row["scan_mode"] == "incremental" and
+                 (profile.get("plan") != "plus_preview" or not item.get("fast")))):
+            db.execute("DELETE FROM scheduled_slots WHERE account_id = ? "
+                       "AND slot_key = ? AND scan_id IS NULL",
+                       (account_id, row["slot_key"]))
+
+
 def save_account(payload: dict, db_path: Path = ALERT_DB,
                  *, allow_legacy_claim: bool = True) -> dict:
     """Create or update an email-labelled local profile without verification."""
@@ -484,6 +564,7 @@ def save_account(payload: dict, db_path: Path = ALERT_DB,
                 WHERE id = ?
             """, (email, profile["plan"], profile["timezone"],
                   int(notifications_enabled), existing["id"]))
+            _prune_obsolete_pending_slots(db, existing["id"], profile)
             if not notifications_enabled:
                 db.execute("DELETE FROM email_outbox WHERE account_id = ? AND sent_at IS NULL",
                            (existing["id"],))
@@ -536,6 +617,7 @@ def save_demo_account(payload: dict, db_path: Path = ALERT_DB) -> dict:
                     email_notifications_enabled = ? WHERE id = ?
             """, (profile["plan"], profile["timezone"],
                   int(notifications_enabled), DEMO_ACCOUNT))
+            _prune_obsolete_pending_slots(db, DEMO_ACCOUNT, profile)
             if not notifications_enabled:
                 db.execute("DELETE FROM email_outbox WHERE account_id = ? AND sent_at IS NULL",
                            (DEMO_ACCOUNT,))
@@ -596,6 +678,8 @@ def list_account_profiles(db_path: Path = ALERT_DB) -> list[dict]:
             "minimum_grade": search["minimum_grade"],
         }
         profile["next_run_at"] = next_scheduled_at(profile).isoformat()
+        next_fast = next_fast_at(profile)
+        profile["next_fast_run_at"] = next_fast.isoformat() if next_fast else None
         profiles.append(profile)
     return profiles
 
@@ -632,15 +716,48 @@ def next_scheduled_at(account: dict, now: datetime | None = None) -> datetime:
     raise AssertionError("The next daily scan should always be within one day")
 
 
+def next_fast_at(account: dict, now: datetime | None = None) -> datetime | None:
+    """Show the next intended half-hour check in the account's timezone."""
+    if account.get("plan") != "plus_preview" or not account.get("configured"):
+        return None
+    if sum(bool(item.get("fast")) for item in account.get("watch_items") or []) != 1:
+        return None
+    current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    candidate = current.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    zone = ZoneInfo(account["timezone"])
+    for _ in range(2880):
+        local = candidate.astimezone(zone)
+        if local.minute in {0, 30} and local.hour not in {7, 12}:
+            return local
+        candidate += timedelta(minutes=1)
+    return None
+
+
 def due_slot(account: dict, now: datetime | None = None) -> str | None:
-    """Allow a run during its scheduled hour; missed hours stay missed."""
+    """Claim today's full scan, including a short catch-up after downtime."""
     if not account.get("configured"):
         return None
     now = now or datetime.now(timezone.utc)
     local = now.astimezone(ZoneInfo(account["timezone"]))
-    if local.hour not in _scheduled_hours(account):
+    for hour in _scheduled_hours(account):
+        planned = datetime.combine(local.date(), time(hour), tzinfo=local.tzinfo)
+        if planned <= local < planned + timedelta(hours=2):
+            return f"{local.date().isoformat()}-{hour:02d}"
+    return None
+
+
+def due_fast_slot(account: dict, now: datetime | None = None) -> str | None:
+    """A bounded half-hour check for one opted-in Plus keyword."""
+    if account.get("plan") != "plus_preview" or not account.get("configured"):
         return None
-    return f"{local.date().isoformat()}-{local.hour:02d}"
+    if sum(bool(item.get("fast")) for item in account.get("watch_items") or []) != 1:
+        return None
+    local = (now or datetime.now(timezone.utc)).astimezone(
+        ZoneInfo(account["timezone"]))
+    # Catch up after short downtime without running back-to-back near the next slot.
+    if local.hour in {7, 12} or local.minute % 30 >= 20:
+        return None
+    return f"fast-{local.date().isoformat()}-{local.hour:02d}-{local.minute // 30 * 30:02d}"
 
 
 def watch_slot_key(slot: str, term: str) -> str:
@@ -650,26 +767,35 @@ def watch_slot_key(slot: str, term: str) -> str:
 
 def claim_slot(slot_key: str, db_path: Path = ALERT_DB,
                account_id: str = DEMO_ACCOUNT,
-               watch_item: dict | None = None) -> bool:
+               watch_item: dict | None = None, *,
+               not_before: str | None = None,
+               scan_mode: str | None = None,
+               retry_root: str | None = None,
+               retry_attempt: int = 0) -> bool:
     with closing(_connect(db_path)) as db, db:
         cursor = db.execute("""
             INSERT OR IGNORE INTO scheduled_slots
-                (account_id, slot_key, claimed_at, watch_item_json)
-            VALUES (?, ?, ?, ?)
+                (account_id, slot_key, claimed_at, watch_item_json,
+                 not_before, scan_mode, retry_root, retry_attempt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (account_id, slot_key, _now(),
-              json.dumps(watch_item) if watch_item else None))
+              json.dumps(watch_item) if watch_item else None,
+              not_before, scan_mode, retry_root, retry_attempt))
         return cursor.rowcount > 0
 
 
 def pending_slots(db_path: Path = ALERT_DB) -> list[dict]:
     with closing(_connect(db_path)) as db:
         rows = db.execute("""
-            SELECT account_id, slot_key, claimed_at, watch_item_json
+            SELECT account_id, slot_key, claimed_at, watch_item_json,
+                   not_before, scan_mode, retry_root, retry_attempt
             FROM scheduled_slots WHERE scan_id IS NULL
             ORDER BY claimed_at, account_id
         """).fetchall()
     return [{"account_id": row["account_id"], "slot_key": row["slot_key"],
-             "claimed_at": row["claimed_at"],
+             "claimed_at": row["claimed_at"], "not_before": row["not_before"],
+             "scan_mode": row["scan_mode"], "retry_root": row["retry_root"],
+             "retry_attempt": row["retry_attempt"],
              **({"watch_item": json.loads(row["watch_item_json"])}
                 if row["watch_item_json"] else {})} for row in rows]
 
@@ -726,7 +852,12 @@ def record_scan_matches(scan: dict, db_path: Path = ALERT_DB) -> int:
 
 def list_alerts(db_path: Path = ALERT_DB, limit: int = 100,
                 search_id: int | None = None,
-                scan_ids: set[str] | None = None) -> dict:
+                scan_ids: set[str] | None = None,
+                triage_status: str = "inbox", offset: int = 0) -> dict:
+    if triage_status not in {"inbox", "saved", "hidden"}:
+        raise ValueError("Choose Inbox, Saved, or Hidden")
+    if limit < 1 or offset < 0:
+        raise ValueError("Choose a valid alert page")
     with closing(_connect(db_path)) as db:
         restriction = " AND search_id = ?" if search_id is not None else ""
         scan_restriction = (" AND scan_id IN (SELECT value FROM json_each(?))"
@@ -734,23 +865,34 @@ def list_alerts(db_path: Path = ALERT_DB, limit: int = 100,
         scan_arguments = (json.dumps(sorted(scan_ids)),) if scan_ids is not None else ()
         arguments = ((search_id,) if search_id is not None else ()) + scan_arguments
         unread = db.execute(
-            "SELECT COUNT(*) FROM match_alerts WHERE read_at IS NULL" +
+            "SELECT COUNT(*) FROM match_alerts WHERE read_at IS NULL "
+            "AND triage_status = 'inbox'" +
             restriction + scan_restriction,
             arguments).fetchone()[0]
+        count_rows = db.execute(
+            "SELECT triage_status, COUNT(*) FROM match_alerts WHERE 1=1" +
+            restriction + scan_restriction + " GROUP BY triage_status",
+            arguments).fetchall()
+        triage_counts = {status: 0 for status in ("inbox", "saved", "hidden")}
+        triage_counts.update({row[0]: row[1] for row in count_rows})
         rows = db.execute("""
             SELECT a.*, s.zip_code, s.item_terms_json
             FROM match_alerts a JOIN saved_searches s ON s.id = a.search_id
-            WHERE (? IS NULL OR a.search_id = ?)
-        """ + scan_restriction + " ORDER BY a.matched_at DESC, a.id DESC LIMIT ?",
-                          (search_id, search_id, *scan_arguments, limit)).fetchall()
-    return {"unread_count": unread, "alerts": [
+            WHERE (? IS NULL OR a.search_id = ?) AND a.triage_status = ?
+        """ + scan_restriction + " ORDER BY a.matched_at DESC, a.id DESC LIMIT ? OFFSET ?",
+                          (search_id, search_id, triage_status,
+                           *scan_arguments, limit, offset)).fetchall()
+    return {"unread_count": unread, "triage_counts": triage_counts,
+            "triage_status": triage_status, "offset": offset,
+            "limit": limit, "alerts": [
         {"id": row["id"], "search_id": row["search_id"],
          "scan_id": row["scan_id"], "listing_id": row["listing_id"],
          "title": row["title"], "item_type": row["item_type"],
          "condition_grade": row["condition_grade"],
          "zip_code": row["zip_code"],
          "item_terms": json.loads(row["item_terms_json"]),
-         "matched_at": row["matched_at"], "read_at": row["read_at"]}
+         "matched_at": row["matched_at"], "read_at": row["read_at"],
+         "triage_status": row["triage_status"]}
         for row in rows]}
 
 
@@ -762,3 +904,30 @@ def mark_read(alert_id: int, db_path: Path = ALERT_DB,
             "WHERE id = ? AND (? IS NULL OR search_id = ?)",
             (_now(), alert_id, search_id, search_id))
         return cursor.rowcount > 0
+
+
+def set_alert_triage(alert_id: int, triage_status: str,
+                     db_path: Path = ALERT_DB,
+                     search_id: int | None = None) -> bool:
+    if triage_status not in {"inbox", "saved", "hidden"}:
+        raise ValueError("Choose Inbox, Saved, or Hidden")
+    with closing(_connect(db_path)) as db, db:
+        cursor = db.execute(
+            "UPDATE match_alerts SET triage_status = ?, "
+            "read_at = CASE WHEN ? = 'inbox' THEN read_at "
+            "ELSE COALESCE(read_at, ?) END "
+            "WHERE id = ? AND (? IS NULL OR search_id = ?)",
+            (triage_status, triage_status, _now(), alert_id,
+             search_id, search_id))
+        return cursor.rowcount > 0
+
+
+def hide_all_inbox_alerts(search_id: int, db_path: Path = ALERT_DB) -> int:
+    """Hide one account's current Inbox alerts; keep Saved and future matches."""
+    with closing(_connect(db_path)) as db, db:
+        cursor = db.execute(
+            "UPDATE match_alerts SET triage_status = 'hidden', "
+            "read_at = COALESCE(read_at, ?) "
+            "WHERE search_id = ? AND triage_status = 'inbox'",
+            (_now(), search_id))
+        return cursor.rowcount
